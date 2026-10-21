@@ -33,8 +33,9 @@ async function nativePlugin() {
   if (!socialLogin) {
     const register = window.capacitorExports?.registerPlugin || window.Capacitor?.registerPlugin;
     if (!register) throw new Error('Google sign-in is not available in this build of the app.');
-    socialLogin = register('SocialLogin');
-    await socialLogin.initialize({ google: { webClientId: GOOGLE_CLIENT_ID, mode: 'online' } });
+    const plugin = register('SocialLogin');
+    await plugin.initialize({ google: { webClientId: GOOGLE_CLIENT_ID, mode: 'online' } });
+    socialLogin = plugin;
   }
   return socialLogin;
 }
