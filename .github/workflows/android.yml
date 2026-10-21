@@ -49,27 +49,20 @@ jobs:
 
       - run: npx cap sync android
 
-      - name: Compile (shows Java errors on failure)
+      - name: Build release APK
         working-directory: android-app/android
-        run: |
-          set -o pipefail
-          ./gradlew :app:compileReleaseJavaWithJavac --console=plain 2>&1 | tee compile.log || {
-            grep -E "error|warning: \[|\.java" compile.log | head -30 | while IFS= read -r line; do echo "::error::$line"; done
-            tail -15 compile.log | while IFS= read -r line; do echo "::error::$line"; done
-            exit 1
-          }
+        run: ./gradlew assembleRelease --console=plain
 
-      - name: Build signed APK
+      # Sign explicitly with apksigner (v1+v2+v3) and verify, so Android accepts the file.
+      - name: Sign APK
         run: |
-          set -o pipefail
-          # Surface build errors as annotations so they show on the run summary.
-          npx cap build android --androidreleasetype APK \
-            --keystorepath "$GITHUB_WORKSPACE/android-app/release.keystore" \
-            --keystorepass myfinances-apk --keystorealias myfinances --keystorealiaspass myfinances-apk 2>&1 | tee build.log || {
-            grep -E "error:|\.java:[0-9]+|symbol|location" build.log | head -40 | while IFS= read -r line; do echo "::error::$line"; done
-            exit 1
-          }
-          cp "$(find android/app/build/outputs/apk/release -name '*.apk' | head -1)" "$GITHUB_WORKSPACE/my-finances.apk"
+          BT="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
+          UNSIGNED=android/app/build/outputs/apk/release/app-release-unsigned.apk
+          "$BT/zipalign" -f -p 4 "$UNSIGNED" aligned.apk
+          "$BT/apksigner" sign --ks release.keystore --ks-key-alias myfinances \
+            --ks-pass pass:myfinances-apk --key-pass pass:myfinances-apk \
+            --out "$GITHUB_WORKSPACE/my-finances.apk" aligned.apk
+          "$BT/apksigner" verify --verbose --print-certs "$GITHUB_WORKSPACE/my-finances.apk"
 
       - uses: actions/upload-artifact@v4
         with:
