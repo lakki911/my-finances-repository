@@ -31,7 +31,9 @@ export const lastSynced = () => store.get('last');
 let socialLogin;
 async function nativePlugin() {
   if (!socialLogin) {
-    socialLogin = window.Capacitor.registerPlugin('SocialLogin');
+    const register = window.capacitorExports?.registerPlugin || window.Capacitor?.registerPlugin;
+    if (!register) throw new Error('Google sign-in is not available in this build of the app.');
+    socialLogin = register('SocialLogin');
     await socialLogin.initialize({ google: { webClientId: GOOGLE_CLIENT_ID, mode: 'online' } });
   }
   return socialLogin;

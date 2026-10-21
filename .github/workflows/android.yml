@@ -34,6 +34,10 @@ jobs:
           rm -rf www && mkdir www
           cp -r ../index.html ../styles.css ../*.js ../manifest.webmanifest ../icons www/
           rm -f www/sw.js
+          # Capacitor's JS runtime (registerPlugin etc.) must load before the app.
+          cp node_modules/@capacitor/core/dist/capacitor.js www/
+          sed -i 's|<script type="module" src="app.js"></script>|<script src="capacitor.js"></script>\n  <script type="module" src="app.js"></script>|' www/index.html
+          grep -q 'src="capacitor.js"' www/index.html
 
       - run: npx cap add android
 
