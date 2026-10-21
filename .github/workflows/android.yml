@@ -49,6 +49,16 @@ jobs:
 
       - run: npx cap sync android
 
+      - name: Compile (shows Java errors on failure)
+        working-directory: android-app/android
+        run: |
+          set -o pipefail
+          ./gradlew :app:compileReleaseJavaWithJavac --console=plain 2>&1 | tee compile.log || {
+            grep -E "error|warning: \[|\.java" compile.log | head -30 | while IFS= read -r line; do echo "::error::$line"; done
+            tail -15 compile.log | while IFS= read -r line; do echo "::error::$line"; done
+            exit 1
+          }
+
       - name: Build signed APK
         run: |
           set -o pipefail
