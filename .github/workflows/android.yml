@@ -11,6 +11,11 @@ on:
 permissions:
   contents: write
 
+# One build at a time, so the newest build is always the latest release.
+concurrency:
+  group: android-apk
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
