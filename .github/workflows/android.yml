@@ -56,7 +56,7 @@ jobs:
           npx cap build android --androidreleasetype APK \
             --keystorepath "$GITHUB_WORKSPACE/android-app/release.keystore" \
             --keystorepass myfinances-apk --keystorealias myfinances --keystorealiaspass myfinances-apk 2>&1 | tee build.log || {
-            grep -iE "error|what went wrong|failed|exception|> " build.log | head -40 | while IFS= read -r line; do echo "::error::$line"; done
+            grep -E "error:|\.java:[0-9]+|symbol|location" build.log | head -40 | while IFS= read -r line; do echo "::error::$line"; done
             exit 1
           }
           cp "$(find android/app/build/outputs/apk/release -name '*.apk' | head -1)" "$GITHUB_WORKSPACE/my-finances.apk"
