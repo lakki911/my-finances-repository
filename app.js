@@ -1,4 +1,5 @@
 import * as db from './db.js';
+import * as sync from './sync.js';
 
 const DEFAULT_CATEGORIES = {
   income: ['Freelance', 'Bonus', 'Interest', 'Rent', 'Gift', 'Other'],
@@ -88,9 +89,9 @@ async function load() {
   if (!prefs) {
     // First run: seed default categories.
     for (const [kind, names] of Object.entries(DEFAULT_CATEGORIES)) {
-      for (const name of names) state.categories.push(await db.put('categories', { kind, name }));
+      for (const name of names) state.categories.push(await db.put('categories', { kind, name }, { seed: true }));
     }
-    state.settings = await db.put('settings', state.settings);
+    state.settings = await db.put('settings', state.settings, { seed: true });
   }
 }
 
@@ -100,11 +101,53 @@ async function save(store, record) {
     const i = state[store].findIndex(r => r.id === rec.id);
     if (i >= 0) state[store][i] = rec; else state[store].push(rec);
   }
+  scheduleSync();
   return rec;
 }
 async function drop(store, id) {
   await db.remove(store, id);
   state[store] = state[store].filter(r => r.id !== id);
+  scheduleSync();
+}
+
+// ---------- sync ----------
+
+let syncMessage = '';
+let syncTimer;
+
+function syncStatusText() {
+  if (syncMessage) return syncMessage;
+  const last = sync.lastSynced();
+  if (!last) return 'Not synced yet.';
+  const mins = Math.round((Date.now() - new Date(last)) / 60000);
+  return `Last synced ${mins < 1 ? 'just now' : mins < 60 ? `${mins} min ago` : new Date(last).toLocaleString()}.`;
+}
+function showSyncStatus() {
+  const el = $('#sync-status');
+  if (el) el.textContent = syncStatusText();
+}
+
+async function runSync(interactive = false) {
+  if (!interactive && !sync.isEnabled()) return;
+  syncMessage = 'Syncing…';
+  showSyncStatus();
+  try {
+    const changed = await sync.syncNow({ interactive });
+    syncMessage = '';
+    if (changed) { await load(); render(); } else if (interactive) render(); else showSyncStatus();
+    if (interactive) toast('Synced with Google Drive');
+  } catch (err) {
+    syncMessage = err instanceof sync.NeedsSignIn ? 'Signed out of Google. Tap Sync now to sign in again.' : (err.message || 'Sync failed. Try again later.');
+    showSyncStatus();
+    if (interactive) toast(syncMessage);
+  }
+}
+
+// Push local changes a few seconds after the last edit.
+function scheduleSync() {
+  if (!sync.isEnabled()) return;
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(() => runSync(false), 3000);
 }
 
 // ---------- views ----------
@@ -159,6 +202,19 @@ function portfolio() {
 
 const stat = (label, value, cls = '', sub = '') =>
   `<div class="card stat"><div class="label">${label}</div><div class="value ${cls}">${value}</div>${sub ? `<div class="sub">${sub}</div>` : ''}</div>`;
+
+function syncCard() {
+  if (!sync.isConfigured()) return '';
+  return `<h2>Google Drive sync</h2>
+    <div class="card">
+      ${sync.isEnabled()
+        ? `<p style="margin-top:0" id="sync-status">${esc(syncStatusText())}</p>
+           <div class="btn-row"><button class="btn primary" data-action="sync-now">Sync now</button><button class="btn" data-action="sync-disconnect">Turn off sync</button></div>`
+        : `<p class="muted" style="margin-top:0">Keep this device in sync with your other devices through your own Google Drive. The data goes into a private app folder that only this app can read.</p>
+           <p class="muted" id="sync-status">${syncMessage ? esc(syncMessage) : ''}</p>
+           <button class="btn primary" data-action="sync-now">Connect Google Drive</button>`}
+    </div>`;
+}
 
 const views = {
   dashboard() {
@@ -265,9 +321,10 @@ const views = {
       ${catBlock('income', 'Income categories')}
       ${catBlock('expense', 'Spending categories')}
       ${catBlock('investment', 'Investment types')}
+      ${syncCard()}
       <h2>Backup</h2>
       <div class="card">
-        <p class="muted" style="margin-top:0">Your data is stored only on this device. Export a backup regularly, and import it on another device to move your data.</p>
+        <p class="muted" style="margin-top:0">${sync.isEnabled() ? 'Your data is also kept in your Google Drive.' : 'Your data is stored only on this device.'} Export a backup file now and then for safekeeping.</p>
         <div class="btn-row">
           <button class="btn primary" data-action="export">Export backup</button>
           <label class="btn">Import backup<input type="file" id="import-file" accept="application/json,.json" hidden></label>
@@ -462,9 +519,17 @@ document.addEventListener('click', async e => {
       toast('Backup downloaded');
       break;
     }
+    case 'sync-now': runSync(true); break;
+    case 'sync-disconnect':
+      if (!confirm('Turn off sync on this device? Your data stays on this device and in Google Drive.')) return;
+      await sync.disconnect();
+      render();
+      toast('Sync turned off');
+      break;
     case 'install': installPrompt?.prompt(); installPrompt = null; render(); break;
     case 'wipe':
-      if (prompt('This deletes everything on this device. Type DELETE to confirm.') !== 'DELETE') return;
+      if (prompt(`This deletes everything on this device${sync.isEnabled() ? ' and turns off sync. Your Google Drive copy is kept' : ''}. Type DELETE to confirm.`) !== 'DELETE') return;
+      await sync.disconnect();
       await db.wipe();
       Object.assign(state, { entries: [], investments: [], categories: [] });
       await load();
@@ -488,6 +553,7 @@ document.addEventListener('change', async e => {
   if (e.target.id === 'month' && e.target.value) { state.month = e.target.value; render(); }
   if (e.target.id === 'currency') {
     state.settings = await db.put('settings', { ...state.settings, currency: e.target.value });
+    scheduleSync();
     toast(`Currency set to ${e.target.value}`);
   }
   if (e.target.id === 'import-file' && e.target.files[0]) {
@@ -496,6 +562,7 @@ document.addEventListener('change', async e => {
       await load();
       render();
       toast(`Imported ${n} record${n === 1 ? '' : 's'}`);
+      scheduleSync();
     } catch (err) {
       toast(err.message || 'Could not read that file');
     }
@@ -509,4 +576,6 @@ window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); instal
 if (['dashboard', 'income', 'spending', 'investments', 'settings'].includes(location.hash.slice(1))) state.tab = location.hash.slice(1);
 await load();
 render();
+runSync(false);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') runSync(false); });
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('sw.js').catch(() => {});

@@ -45,8 +45,9 @@ export async function all(store) {
   return rows.filter(r => !r.deleted);
 }
 
-export function put(store, record) {
-  const rec = { ...record, id: record.id || uid(), updatedAt: new Date().toISOString(), deleted: false };
+// `seed: true` marks built-in defaults as oldest, so synced data always wins over them.
+export function put(store, record, { seed = false } = {}) {
+  const rec = { ...record, id: record.id || uid(), updatedAt: seed ? new Date(0).toISOString() : new Date().toISOString(), deleted: false };
   return run(store, 'readwrite', s => s.put(rec)).then(() => rec);
 }
 
