@@ -1,0 +1,66 @@
+# Builds a signed Android APK from the web app on every push to main,
+# and publishes it as a GitHub release (download: Releases → my-finances.apk).
+name: Build Android APK
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android-app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - run: npm install
+
+      - name: Copy web app into www
+        run: |
+          rm -rf www && mkdir www
+          cp -r ../index.html ../styles.css ../app.js ../db.js ../manifest.webmanifest ../icons www/
+          [ -f ../sync.js ] && cp ../sync.js www/ || true
+
+      - run: npx cap add android
+      - run: npx capacitor-assets generate --android
+
+      - name: Set app version from run number
+        run: |
+          sed -i -E "s/versionCode [0-9]+/versionCode ${{ github.run_number }}/; s/versionName \"[^\"]+\"/versionName \"1.${{ github.run_number }}\"/" android/app/build.gradle
+          grep -E "versionCode|versionName" android/app/build.gradle
+
+      - run: npx cap sync android
+
+      - name: Build signed APK
+        run: |
+          npx cap build android --androidreleasetype APK \
+            --keystorepath "$GITHUB_WORKSPACE/android-app/release.keystore" \
+            --keystorepass myfinances-apk --keystorealias myfinances --keystorealiaspass myfinances-apk
+          cp "$(find android/app/build/outputs/apk/release -name '*.apk' | head -1)" "$GITHUB_WORKSPACE/my-finances.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: my-finances-apk
+          path: my-finances.apk
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.${{ github.run_number }}
+          name: My Finances 1.${{ github.run_number }}
+          body: Install my-finances.apk on your Android phone.
+          files: my-finances.apk
+          make_latest: true

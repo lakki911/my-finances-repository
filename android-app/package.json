@@ -1,0 +1,11 @@
+{
+  "name": "my-finances-android",
+  "private": true,
+  "description": "Wraps the My Finances web app into an Android APK with Capacitor. Built by .github/workflows/android.yml.",
+  "devDependencies": {
+    "@capacitor/android": "^7.4.0",
+    "@capacitor/assets": "^3.0.5",
+    "@capacitor/cli": "^7.4.0",
+    "@capacitor/core": "^7.4.0"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "appId": "com.lakki911.myfinances",
+  "appName": "My Finances",
+  "webDir": "www",
+  "android": {
+    "backgroundColor": "#0f766e"
+  }
+}
