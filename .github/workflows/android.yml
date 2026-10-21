@@ -51,9 +51,14 @@ jobs:
 
       - name: Build signed APK
         run: |
+          set -o pipefail
+          # Surface build errors as annotations so they show on the run summary.
           npx cap build android --androidreleasetype APK \
             --keystorepath "$GITHUB_WORKSPACE/android-app/release.keystore" \
-            --keystorepass myfinances-apk --keystorealias myfinances --keystorealiaspass myfinances-apk
+            --keystorepass myfinances-apk --keystorealias myfinances --keystorealiaspass myfinances-apk 2>&1 | tee build.log || {
+            grep -iE "error|what went wrong|failed|exception|> " build.log | head -40 | while IFS= read -r line; do echo "::error::$line"; done
+            exit 1
+          }
           cp "$(find android/app/build/outputs/apk/release -name '*.apk' | head -1)" "$GITHUB_WORKSPACE/my-finances.apk"
 
       - uses: actions/upload-artifact@v4
