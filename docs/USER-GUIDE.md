@@ -22,7 +22,7 @@
 | **Overview** | The month at a glance: what's left over, quick-add buttons, warnings, bills due soon, budgets, where the money went, and the last 6 months. |
 | **Income** and **Spending** | Your entries for the month. Tap one to change or delete it. |
 | **Invest** | Holdings, returns per year (XIRR), asset allocation, and mutual fund values from the daily NAV. |
-| **Plan** | Budgets, bills and recurring items, savings goals, money lent and borrowed, loans, and insurance and FDs. |
+| **Plan** | Budgets, savings, bills and recurring items, savings goals, money lent and borrowed, loans, and insurance and FDs. |
 | **Reports** | The year (April to March or January to December), monthly summary, trends, net worth, income tax estimate, and Excel or CSV export. |
 | **Family** | Family budgets and goals, and split expenses. Admins and co-admins also see each member's records, recent activity and roles. |
 | 🔍 and ⚙ at the top | Search all your records, and Settings. |
@@ -39,6 +39,7 @@
 
 - **Budgets:** set a monthly limit for a category or for all spending. Bars turn amber at 80% and red when you go over, and the app warns you as you add spending. Turn on **Carry over what's left** to add unspent money to next month.
 - **Bills & recurring:** add rent, EMIs, SIPs and subscriptions. Choose **Remind me** (it shows under Due soon, and you tap **Paid**) or **Add automatically** (it's recorded on the due day). The Plan tab shows a red number when something is due within 3 days.
+- **Savings:** money you already have set aside (emergency fund, cash at home, a savings account). Add to it or tap **Take out** whenever you use some. Savings never change the monthly figures; they count in net worth and show on the Overview. A Savings / cash holding in Invest can be moved here with **Move to Savings**.
 - **Goals:** set a target and a date, and the app tells you how much to put aside each month. You can count a holding towards a goal.
 - **Lent & borrowed:** keep track of money lent to or borrowed from people, with a due date and repayments.
 - **Loans:** enter the amount, interest and tenure to see the EMI, what's left, the interest so far and the end date. Add part-prepayments to see the new end date.
@@ -76,7 +77,7 @@ Family sharing, receipt photos and the device list need updated security rules i
 
 - **Account:** who's signed in and when data last synced. **Sync now**, **Change password** and **Sign out** (which saves your changes to the cloud first).
 - **Security:** **App lock** asks for a PIN (and fingerprint in the Android app) when the app opens. **Sign out when idle** signs you out after a set time. **Signed-in devices** lists where your account was used; change your password to sign out everywhere else.
-- **Quick-add buttons:** remove the ones you no longer need.
+- **Quick-add buttons:** remove the ones you no longer need with ×. (The **Manage** button next to Quick add on the Overview opens this.)
 - **Look:** **Fresh** (light), **Vault** (dark) or **Auto** (follows your phone's dark mode). **Language:** English or हिन्दी (main labels are translated; some messages stay in English).
 - **Categories:** add your own, including sub-categories (for example Food & dining › Swiggy).
 - **Currency** and **Backup** (export a full backup file, or import one).

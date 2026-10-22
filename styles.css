@@ -407,3 +407,4 @@ fieldset.split-who legend { padding: 0; margin-bottom: 6px; }
 .money-move .check { flex: 1 1 100%; font-weight: 500; }
 .link-btn { display: block; width: fit-content; margin-top: 4px; white-space: nowrap; padding: 2px 8px; border: 1px solid var(--border); border-radius: 999px; background: none; color: var(--muted); font: inherit; font-size: 12px; cursor: pointer; }
 .link-btn.on { border-color: var(--accent); color: var(--accent); }
+.hint-card { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 14px; margin: 4px 0 8px; box-shadow: none; }

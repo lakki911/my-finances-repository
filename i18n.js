@@ -61,7 +61,7 @@ const HI = {
   'After 15 minutes': '15 मिनट बाद', 'After 1 hour': '1 घंटे बाद', 'After 1 day': '1 दिन बाद', 'Auto': 'अपने आप',
   'Tap a person to see their records. Only admins and co-admins can see this section.': 'किसी व्यक्ति के रिकॉर्ड देखने के लिए उस पर टैप करें। यह हिस्सा केवल एडमिन और को-एडमिन देख सकते हैं।',
   'Due soon': 'जल्द देय', 'Heads up': 'ध्यान दें', 'Save as': 'ऐसे सहेजें',
-  'Update': 'अपडेट करें',
+  'Update': 'अपडेट करें', 'Savings': 'जमा पूँजी', 'Total savings': 'कुल जमा पूँजी', '+ Savings': '+ जमा पूँजी', 'Take out': 'निकालें', 'Add savings': 'जमा पूँजी जोड़ें', 'Move to Savings': 'जमा पूँजी में ले जाएँ',
   'Unlock': 'खोलें', 'Use fingerprint': 'फ़िंगरप्रिंट से खोलें', 'Forgot PIN?': 'PIN भूल गए?',
 };
 

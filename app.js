@@ -115,6 +115,9 @@ const entriesIn = (month, type, d = state) => d.entries.filter(e => e.date.start
 // but not that month's investing or left-over figures.
 const investedIn = (month, d = state) => sum(d.investments.flatMap(i => i.contributions || []).filter(c => !c.opening && c.date.startsWith(month)), c => c.amount);
 const investedTotal = inv => sum(inv.contributions || [], c => c.amount);
+// Savings: money you keep aside (emergency fund, cash at home…). Never part of the monthly totals.
+const savingsBalance = s => sum(s.moves || [], m => m.amount);
+const savingsTotal = () => sum(state.savings, savingsBalance);
 
 function monthTotals(month, d = state) {
   const salary = sum(entriesIn(month, 'salary', d), e => e.amount);
@@ -792,7 +795,8 @@ const views = {
         ${stat('Spending', money(t.spent), 'spend')}
         ${stat('Invested', money(t.invested), 'invest')}
       </div>
-      ${state.templates.length ? `<h2>Quick add</h2><div class="quick">${[...state.templates].sort(byName).map(q => `<button class="chip-btn" data-action="quick-template" data-id="${q.id}">${esc(q.name)} · ${money(q.amount)}</button>`).join('')}</div>` : ''}
+      ${state.savings.length ? `<div class="section-head"><h2>Savings</h2><button class="btn small" data-tab="plan" data-plan="savings">Manage</button></div>${listCard(state.savings.slice().sort((a, b) => savingsBalance(b) - savingsBalance(a)).slice(0, 4).map(savingsRow), '')}` : ''}
+      ${state.templates.length ? `<div class="section-head"><h2>Quick add</h2><button class="btn small" data-tab="settings">Manage</button></div><div class="quick">${[...state.templates].sort(byName).map(q => `<button class="chip-btn" data-action="quick-template" data-id="${q.id}">${esc(q.name)} · ${money(q.amount)}</button>`).join('')}</div>` : ''}
       ${showSummary ? `<div class="card summary-teaser"><div><b>${esc(monthLabel(last, { month: 'long' }))} in short:</b> you kept ${money(lt.saved)}${lt.income ? ` (${Math.round((lt.saved / lt.income) * 100)}% of income)` : ''} and spent ${money(lt.spent)}.</div><button class="btn small" data-action="open-summary">See summary</button></div>` : ''}
       ${tips.length ? `<div class="card tips">${tips.map(x => `<p class="tip">${x}</p>`).join('')}</div>` : ''}
       ${due.length || debtsDue.length || polDue.length ? `<div class="section-head"><h2>Due soon</h2><button class="btn small" data-tab="plan" data-plan="bills">All bills</button></div>${listCard([...due.map(dueRow), ...debtsDue.map(debtRow), ...polDue.map(p => policyRow(p, true))], '')}` : ''}
@@ -935,7 +939,7 @@ const views = {
   },
 
   plan() {
-    return subnav('plan', { budgets: 'Budgets', bills: 'Bills & recurring', goals: 'Goals', lending: 'Lent & borrowed', loans: 'Loans', policies: 'Insurance & FDs' }) + planViews[state.planView]();
+    return subnav('plan', { budgets: 'Budgets', savings: 'Savings', bills: 'Bills & recurring', goals: 'Goals', lending: 'Lent & borrowed', loans: 'Loans', policies: 'Insurance & FDs' }) + planViews[state.planView]();
   },
 
   reports() {
@@ -1034,7 +1038,20 @@ const familyViews = {
 
 
 
+const savingsRow = s => `<div class="row" data-action="edit-savings" data-id="${s.id}">
+  ${avatar(s.name)}
+  <div class="main"><div class="title">${esc(s.name)}</div><div class="meta">${s.note ? `${esc(s.note)} · ` : ''}${(s.moves || []).length} ${(s.moves || []).length === 1 ? 'entry' : 'entries'}</div></div>
+  <div class="amt income">${money(savingsBalance(s))}</div></div>`;
+
 const planViews = {
+  savings() {
+    const list = [...state.savings].sort((a, b) => a.name.localeCompare(b.name));
+    return `
+      <div class="grid">${stat('Total savings', money(savingsTotal()), 'income')}${stat('Savings pots', String(list.length))}</div>
+      <div class="section-head"><h2>Savings</h2><button class="btn small" data-action="add-savings">+ Savings</button></div>
+      ${listCard(list.map(savingsRow), 'Keep track of money you already have set aside: an emergency fund, cash at home, a savings account. Add to it or take money out whenever you like.')}
+      <p class="muted small-note">Savings don't change your monthly income, spending or left-over figures. They count towards your net worth.</p>`;
+  },
   budgets() {
     const rows = budgetStatus(state.month);
     const over = rows.filter(r => r.pct > 100).length;
@@ -1130,11 +1147,11 @@ async function insuranceCategory() {
 
 // ---- net worth ----
 function netWorthNow() {
-  const investments = portfolio().current;
+  const investments = portfolio().current, savings = savingsTotal();
   const open = state.debts.filter(x => debtLeft(x) > 0.005);
   const lent = sum(open.filter(x => x.direction === 'lent'), debtLeft), borrowed = sum(open.filter(x => x.direction === 'borrowed'), debtLeft);
   const loans = sum(state.loans, l => loanNow(l).left);
-  return { investments, lent, loans, borrowed, assets: investments + lent, liabilities: loans + borrowed, net: investments + lent - loans - borrowed };
+  return { investments, savings, lent, loans, borrowed, assets: investments + savings + lent, liabilities: loans + borrowed, net: investments + savings + lent - loans - borrowed };
 }
 // Keeps one net worth figure per month, so the trend builds up over time.
 async function recordNetWorth() {
@@ -1386,13 +1403,14 @@ const reportViews = {
       </section>
       <div class="grid quad">
         ${stat('Investments', money(n.investments), 'invest')}
+        ${stat('Savings', money(n.savings), 'income')}
         ${stat('Money lent', money(n.lent), 'income')}
         ${stat('Loans', money(n.loans), 'spend')}
         ${stat('Money borrowed', money(n.borrowed), 'spend')}
       </div>
       <h2>Month by month</h2>
       <div class="card">${hist.length > 1 ? simpleBars(hist, 'var(--income)') : '<div class="empty">The app records your net worth each month when you open it. The chart fills in from next month.</div>'}</div>
-      <p class="muted small-note">Investments use their current value. Bank balances and property aren't included unless you add them as holdings in Invest.</p>`;
+      <p class="muted small-note">Investments use their current value. Bank balances and property aren't included unless you add them as savings or holdings.</p>`;
   },
   tax() {
     const fy = state.taxYear ?? fyStart(todayISO().slice(0, 7));
@@ -1773,6 +1791,61 @@ function pinDialog(mode) {
   });
 }
 
+function savingsDialog(pot) {
+  const s = pot || { moves: [] };
+  const moves = [...(s.moves || [])].sort(byDateDesc);
+  openDialog(`
+    <h3>${pot ? esc(pot.name) : 'Add savings'}</h3>
+    <label class="field">Name<input name="name" required maxlength="60" value="${esc(s.name || '')}" placeholder="e.g. Emergency fund, Cash at home" ${pot ? '' : 'autofocus'}></label>
+    ${pot ? `
+      <div class="section-head" style="margin:6px 0 0"><b>Money in and out</b><span class="muted">${money(savingsBalance(s))} now</span></div>
+      <div class="inline-form money-move" style="margin-top:0">
+        <input class="inline-input" name="mAmount" type="number" inputmode="decimal" step="0.01" min="0.01" placeholder="Amount">
+        <input class="inline-input" name="mDate" type="date" value="${defaultDate()}">
+        <button class="btn" value="put-in" formnovalidate>Add</button>
+        <button class="btn" value="take-out" formnovalidate>Take out</button>
+      </div>
+      <div style="max-height:200px;overflow:auto">${moves.map(m => `<div class="row static" style="padding:8px 4px">
+        <div class="main meta">${fmtDate(m.date)} ${m.date.slice(0, 4)}</div><div class="amt ${m.amount < 0 ? 'spend' : 'income'}">${m.amount < 0 ? `−${money(-m.amount)}` : `+${money(m.amount)}`}</div>
+        <button class="btn small" value="rm:${m.id}" formnovalidate aria-label="Remove">×</button></div>`).join('') || '<div class="empty">Nothing added yet.</div>'}</div>`
+    : `<div class="two">
+        <label class="field">Amount you have now<input name="initial" type="number" inputmode="decimal" step="0.01" min="0"></label>
+        <label class="field">As of<input name="date" type="date" value="${todayISO()}"></label>
+      </div>`}
+    <label class="field">Note (optional)<input name="note" maxlength="120" value="${esc(s.note || '')}" placeholder="e.g. SBI savings account"></label>
+    <p class="muted hint" style="margin:0">Savings don't change your monthly totals. If you spend money you take out, add that as spending too.</p>
+    ${actions(!!pot)}`,
+  async (fd, action) => {
+    const base = { ...s, name: fd.get('name').trim(), note: fd.get('note').trim() };
+    if (action === 'delete') {
+      if (!confirm(`Delete "${pot.name}" and its history?`)) return false;
+      await drop('savings', pot.id);
+      toast('Savings deleted');
+    } else if (action === 'put-in' || action === 'take-out') {
+      const amount = parseFloat(fd.get('mAmount'));
+      if (!(amount > 0)) throw new Error('Enter an amount above zero');
+      if (action === 'take-out' && amount > savingsBalance(s) + 0.005 && !confirm(`That's more than the ${money(savingsBalance(s))} in here. Take it out anyway?`)) return false;
+      const rec = await save('savings', { ...base, moves: [...(s.moves || []), { id: db.uid(), date: fd.get('mDate') || defaultDate(), amount: action === 'take-out' ? -amount : amount }] });
+      toast(action === 'take-out' ? `Took out ${money(amount)}` : `Added ${money(amount)}`);
+      render();
+      savingsDialog(rec);
+      return false;
+    } else if (action.startsWith('rm:')) {
+      const rec = await save('savings', { ...base, moves: s.moves.filter(m => m.id !== action.slice(3)) });
+      render();
+      savingsDialog(rec);
+      return false;
+    } else {
+      if (!base.name) throw new Error('Give it a name');
+      const initial = parseFloat(fd.get('initial'));
+      if (!pot && initial > 0) base.moves = [{ id: db.uid(), date: fd.get('date') || todayISO(), amount: initial }];
+      await save('savings', base);
+      toast(pot ? 'Saved' : 'Savings added');
+    }
+    render();
+  });
+}
+
 function goalDialog(goal) {
   const g = goal || { saved: [] };
   const list = [...(g.saved || [])].sort(byDateDesc);
@@ -2126,6 +2199,7 @@ function investmentDialog(inv) {
         <div class="main meta">${fmtDate(c.date)} ${c.date.slice(0, 4)}<button class="link-btn ${c.opening ? 'on' : ''}" value="op:${c.id}" formnovalidate>${c.opening ? '✓ Kept out of month' : 'Counted in month'}</button></div><div class="amt ${c.amount < 0 ? 'spend' : 'invest'}">${c.amount < 0 ? `−${money(-c.amount)}` : `+${money(c.amount)}`}</div>
         <button class="btn small" value="rm:${c.id}" formnovalidate aria-label="Remove">×</button></div>`).join('') || '<div class="empty">No contributions yet.</div>'}</div>` : ''}
     <label class="field">Note (optional)<input name="note" maxlength="120" value="${esc(i.note || '')}"></label>
+    ${inv && (i.assetClass === 'cash' || /saving|cash/i.test(catName(i.categoryId))) ? `<div class="card hint-card"><span class="muted">Is this savings rather than an investment?</span><button class="btn small" value="to-savings" formnovalidate>Move to Savings</button></div>` : ''}
     ${actions(!!inv)}`,
   async (fd, action) => {
     const cv = fd.get('currentValue');
@@ -2165,6 +2239,15 @@ function investmentDialog(inv) {
       render();
       investmentDialog(saved);
       return false;
+    } else if (action === 'to-savings') {
+      if (!confirm(`Move "${inv.name}" from Invest to Plan → Savings?`)) return false;
+      const moves = (inv.contributions || []).map(c => ({ id: c.id, date: c.date, amount: c.amount }));
+      const diff = inv.currentValue == null ? 0 : inv.currentValue - investedTotal(inv);
+      if (Math.abs(diff) > 0.005) moves.push({ id: db.uid(), date: todayISO(), amount: diff });
+      await save('savings', { name: inv.name, note: inv.note || '', moves });
+      await drop('investments', inv.id);
+      state.tab = 'plan'; state.planView = 'savings'; location.hash = 'plan';
+      toast('Moved to Savings');
     } else if (action.startsWith('op:')) {
       const saved = await save('investments', { ...base, contributions: i.contributions.map(c => (c.id === action.slice(3) ? { ...c, opening: !c.opening } : c)) });
       render();
@@ -2224,6 +2307,8 @@ document.addEventListener('click', async e => {
     case 'add-expense': entryDialog({ type: 'expense', date: defaultDate() }); break;
     case 'edit-entry': entryDialog(state.entries.find(x => x.id === id)); break;
     case 'add-investment': investmentDialog(); break;
+    case 'add-savings': savingsDialog(); break;
+    case 'edit-savings': savingsDialog(state.savings.find(x => x.id === id)); break;
     case 'edit-investment': investmentDialog(state.investments.find(x => x.id === id)); break;
     case 'delete-category': {
       const used = state.entries.some(x => x.categoryId === id) || state.investments.some(x => x.categoryId === id);
