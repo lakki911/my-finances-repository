@@ -372,3 +372,19 @@ body.signed-out { padding-left: 0; padding-bottom: 24px; }
 .goal .bar-fill { background: var(--tone); }
 .goal-plan { font-size: 13.5px; color: var(--muted); }
 .goal-plan b { color: var(--text); }
+
+/* Batch 3: summary, tax, loans, funds */
+.summary-teaser { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; font-size: 14px; }
+.summary-lines { display: flex; flex-direction: column; gap: 10px; font-size: 15px; }
+.summary-lines p { margin: 0; }
+.regime .label { color: var(--muted); font-size: 13px; font-weight: 650; }
+.regime .value { font-size: 24px; font-weight: 800; margin-top: 2px; font-variant-numeric: tabular-nums; }
+.regime .sub { color: var(--muted); font-size: 12.5px; }
+.regime.best { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset, var(--shadow); }
+.tax-form { display: flex; flex-direction: column; gap: 14px; }
+details.fund, dialog details { background: var(--surface-2); border-radius: 12px; padding: 10px 12px; }
+details > summary { cursor: pointer; font-weight: 650; font-size: 13.5px; color: var(--accent); }
+details .table { margin-top: 8px; }
+.loan-stats .stat { padding: 10px 12px; }
+.loan-stats .stat .value { font-size: 16px; }
+.field input::placeholder, .inline-input::placeholder { color: var(--muted); opacity: .55; }

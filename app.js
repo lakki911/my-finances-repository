@@ -3,6 +3,7 @@ import * as auth from './auth.js';
 import * as cloud from './cloud.js';
 import * as lock from './lock.js';
 import { toCSV, toXLSX, saveFile } from './exporter.js';
+import { xirr, emi, schedule, incomeTax } from './finance.js';
 
 const DEFAULT_CATEGORIES = {
   income: ['Freelance', 'Bonus', 'Interest', 'Rent', 'Gift', 'Other'],
@@ -14,6 +15,9 @@ const TYPE_LABEL = { salary: 'Salary', income: 'Other income', expense: 'Spendin
 const METHODS = { upi: 'UPI', cash: 'Cash', card: 'Card', bank: 'Bank transfer', other: 'Other' };
 const FREQ = { 1: 'Every month', 3: 'Every 3 months', 6: 'Every 6 months', 12: 'Every year' };
 const RTYPE = { expense: 'Spending', income: 'Income', salary: 'Salary', investment: 'SIP' };
+const ASSET = { equity: 'Equity', debt: 'Debt', gold: 'Gold', realestate: 'Real estate', crypto: 'Crypto', cash: 'Cash', other: 'Other' };
+const LOAN_KIND = { home: 'Home loan', car: 'Car loan', personal: 'Personal loan', education: 'Education loan', gold: 'Gold loan', other: 'Other loan' };
+const POLICY_KIND = { life: 'Life insurance', term: 'Term insurance', health: 'Health insurance', vehicle: 'Vehicle insurance', fd: 'Fixed deposit', other: 'Other' };
 // Stores held in memory as arrays (settings is a single record).
 const LISTS = db.STORES.filter(s => s !== 'settings');
 const TABS = ['dashboard', 'income', 'spending', 'investments', 'plan', 'reports', 'family', 'settings', 'search'];
@@ -140,7 +144,11 @@ const monthDiff = (a, b) => (Number(b.slice(0, 4)) - Number(a.slice(0, 4))) * 12
 async function load() {
   const lists = await Promise.all(LISTS.map(s => db.all(s)));
   LISTS.forEach((s, i) => { state[s] = lists[i]; });
-  const prefs = (await db.all('settings')).find(s => s.id === 'prefs');
+  const settings = await db.all('settings');
+  const prefs = settings.find(s => s.id === 'prefs');
+  // Other single records kept in the settings store: net worth by month, tax helper inputs.
+  state.netLog = settings.find(s => s.id === 'networth') || { id: 'networth', months: {} };
+  state.taxInputs = settings.find(s => s.id === 'tax') || { id: 'tax', years: {} };
   if (prefs) state.settings = prefs;
   if (!prefs) {
     // First run: seed default categories.
@@ -297,6 +305,10 @@ async function enterAccount() {
   if (!TABS.includes(state.tab) || (state.tab === 'family' && !auth.isAdmin())) state.tab = 'dashboard';
   render();
   await runSync(false);
+  let navRun = '';
+  try { navRun = localStorage.getItem('nav.lastRun') || ''; } catch {}
+  if (navRun !== todayISO() && state.investments.some(i => i.schemeCode && i.units > 0)) refreshNav(undefined, true);
+  recordNetWorth();
 }
 
 function signedOut() {
@@ -352,7 +364,7 @@ function bars(pairs, cls = '', empty = 'Nothing yet this month.') {
   </div>`).join('')}</div>`;
 }
 
-function donut(pairs) {
+function donut(pairs, label = 'Spent') {
   const total = sum(pairs, p => p[1]);
   const R = 52, C = 2 * Math.PI * R;
   let offset = 0;
@@ -362,10 +374,10 @@ function donut(pairs) {
     offset += len;
     return arc;
   }).join('');
-  return `<svg class="donut" viewBox="0 0 140 140" role="img" aria-label="Spending by category">
+  return `<svg class="donut" viewBox="0 0 140 140" role="img" aria-label="${esc(label)} by category">
     <circle r="${R}" cx="70" cy="70" fill="none" stroke="var(--surface-2)" stroke-width="18"/>
     <g transform="rotate(-90 70 70)">${arcs}</g>
-    <text x="70" y="66" text-anchor="middle" class="donut-label">Spent</text>
+    <text x="70" y="66" text-anchor="middle" class="donut-label">${esc(label)}</text>
     <text x="70" y="86" text-anchor="middle" class="donut-value">${money(total)}</text>
   </svg>`;
 }
@@ -426,6 +438,54 @@ function recurringRow(u) {
     <div class="main"><div class="title">${esc(r.name)}</div><div class="meta">${esc(what)} · ${FREQ[r.every] || FREQ[1]} · next ${fmtDate(u.date)} · ${r.mode === 'auto' ? 'added automatically' : 'reminder'}</div></div>
     <div class="amt ${r.type === 'expense' ? 'spend' : r.type === 'investment' ? 'invest' : 'income'}">${money(r.amount)}</div>
   </div>`;
+}
+
+// Asset class: chosen on the holding, or guessed from its type.
+function assetClassOf(i) {
+  if (ASSET[i.assetClass]) return i.assetClass;
+  const n = catName(i.categoryId).toLowerCase();
+  return /stock|equity|share|elss|index/.test(n) ? 'equity' : /mutual|sip/.test(n) ? 'equity' : /fixed|deposit|ppf|epf|bond|debt|nps|rd/.test(n) ? 'debt'
+    : /gold/.test(n) ? 'gold' : /crypto|bitcoin/.test(n) ? 'crypto' : /property|real|land|flat/.test(n) ? 'realestate' : 'other';
+}
+// Annual return of holdings: contributions paid in, current value received today.
+const holdingXirr = list => xirr([
+  ...list.flatMap(i => (i.contributions || []).map(c => ({ date: c.date, amount: -c.amount }))),
+  { date: todayISO(), amount: sum(list, i => i.currentValue ?? investedTotal(i)) },
+]);
+
+// JSON from another site. The Android app falls back to native HTTP if the browser route is blocked.
+async function getJSON(url) {
+  try {
+    const res = await fetch(url);
+    if (res.ok) return await res.json();
+  } catch {}
+  if (window.Capacitor?.isNativePlatform?.()) {
+    const http = window.Capacitor.Plugins?.CapacitorHttp || window.Capacitor.registerPlugin('CapacitorHttp');
+    const res = await http.request({ url, method: 'GET' });
+    return typeof res.data === 'string' ? JSON.parse(res.data) : res.data;
+  }
+  throw new Error('Could not reach the fund price service. Check your internet connection.');
+}
+
+// Mutual fund values from the latest NAV (free daily AMFI data via api.mfapi.in).
+async function refreshNav(list = state.investments.filter(i => i.schemeCode && i.units > 0), quiet = false) {
+  let n = 0;
+  for (const i of list) {
+    try {
+      const d = await getJSON(`https://api.mfapi.in/mf/${encodeURIComponent(i.schemeCode)}/latest`);
+      const nav = parseFloat(d?.data?.[0]?.nav);
+      if (!(nav > 0)) continue;
+      const [dd, mm, yy] = d.data[0].date.split('-');
+      await save('investments', { ...state.investments.find(x => x.id === i.id), nav, navDate: `${yy}-${mm}-${dd}`, currentValue: Math.round(i.units * nav * 100) / 100 });
+      n++;
+    } catch (err) {
+      if (!quiet) { toast(err.message); return n; }
+    }
+  }
+  try { localStorage.setItem('nav.lastRun', todayISO()); } catch {}
+  if (n) render();
+  if (!quiet) toast(n ? `Updated ${n} fund${n === 1 ? '' : 's'}` : 'No fund values changed');
+  return n;
 }
 
 const stat = (label, value, cls = '', sub = '') =>
@@ -500,6 +560,9 @@ const views = {
     const spendCats = byCategory(entriesIn(state.month, 'expense'), state, true);
     const due = dueSoon();
     const debtsDue = debtsDueSoon();
+    const polDue = policiesDue(7);
+    const last = shiftMonth(state.month, -1), lt = monthTotals(last);
+    const showSummary = state.month === todayISO().slice(0, 7) && Number(todayISO().slice(8)) <= 7 && (lt.income || lt.spent);
     const budgets = budgetStatus(state.month);
     const tips = insights();
     return `
@@ -521,8 +584,9 @@ const views = {
         ${stat('Invested', money(t.invested), 'invest')}
       </div>
       ${state.templates.length ? `<h2>Quick add</h2><div class="quick">${[...state.templates].sort(byName).map(q => `<button class="chip-btn" data-action="quick-template" data-id="${q.id}">${esc(q.name)} · ${money(q.amount)}</button>`).join('')}</div>` : ''}
+      ${showSummary ? `<div class="card summary-teaser"><div><b>${esc(monthLabel(last, { month: 'long' }))} in short:</b> you kept ${money(lt.saved)}${lt.income ? ` (${Math.round((lt.saved / lt.income) * 100)}% of income)` : ''} and spent ${money(lt.spent)}.</div><button class="btn small" data-action="open-summary">See summary</button></div>` : ''}
       ${tips.length ? `<div class="card tips">${tips.map(x => `<p class="tip">${x}</p>`).join('')}</div>` : ''}
-      ${due.length || debtsDue.length ? `<div class="section-head"><h2>Due soon</h2><button class="btn small" data-tab="plan" data-plan="bills">All bills</button></div>${listCard([...due.map(dueRow), ...debtsDue.map(debtRow)], '')}` : ''}
+      ${due.length || debtsDue.length || polDue.length ? `<div class="section-head"><h2>Due soon</h2><button class="btn small" data-tab="plan" data-plan="bills">All bills</button></div>${listCard([...due.map(dueRow), ...debtsDue.map(debtRow), ...polDue.map(p => policyRow(p, true))], '')}` : ''}
       ${budgets.length ? `<div class="section-head"><h2>Budgets</h2><button class="btn small" data-tab="plan" data-plan="budgets">Manage</button></div>
         <div class="card budgets">${budgets.slice(0, 4).map(budgetBar).join('')}</div>` : ''}
       <h2>Where the money went</h2>
@@ -580,12 +644,16 @@ const views = {
     const p = portfolio();
     const rows = [...state.investments].sort((a, b) => a.name.localeCompare(b.name)).map(i => {
       const inv = investedTotal(i), cur = i.currentValue ?? inv, g = inv ? ((cur - inv) / inv) * 100 : NaN;
+      const r = holdingXirr([i]);
       return `<div class="row" data-action="edit-investment" data-id="${i.id}">
         ${avatar(i.name)}
-        <div class="main"><div class="title">${esc(i.name)}</div><div class="meta">${esc(catName(i.categoryId))} · invested ${money(inv)}</div></div>
+        <div class="main"><div class="title">${esc(i.name)}</div><div class="meta">${esc(catName(i.categoryId))} · invested ${money(inv)}${isFinite(r) ? ` · ${pct(r * 100)} a year` : ''}${i.navDate ? ` · NAV ${esc(fmtDate(i.navDate))}` : ''}</div></div>
         <div class="amt">${money(cur)}<div class="meta ${cur < inv ? 'neg' : 'income'}">${pct(g)}</div></div>
       </div>`;
     });
+    const alloc = [...state.investments.reduce((m, i) => m.set(ASSET[assetClassOf(i)], (m.get(ASSET[assetClassOf(i)]) || 0) + (i.currentValue ?? investedTotal(i))), new Map())].filter(a => a[1] > 0).sort((a, b) => b[1] - a[1]);
+    const allR = holdingXirr(state.investments);
+    const linked = state.investments.some(i => i.schemeCode && i.units > 0);
     const thisMonth = state.investments.flatMap(i => (i.contributions || []).filter(c => c.date.startsWith(state.month)).map(c => ({ ...c, inv: i })))
       .sort(byDateDesc)
       .map(c => `<div class="row" data-action="edit-investment" data-id="${c.inv.id}">
@@ -597,8 +665,10 @@ const views = {
         ${stat('Current value', money(p.current))}
         ${stat('Gain / loss', money(p.gain), p.gain < 0 ? 'neg' : 'income', pct(p.gainPct))}
         ${stat(`Invested in ${esc(monthLabel(state.month, { month: 'short' }))}`, money(investedIn(state.month)), 'invest')}
+        ${isFinite(allR) ? stat('Return per year (XIRR)', pct(allR * 100), allR < 0 ? 'neg' : 'income', 'Across all holdings') : ''}
       </div>
-      <div class="section-head"><h2>Holdings</h2><button class="btn small" data-action="add-investment">+ Investment</button></div>
+      ${alloc.length ? `<h2>Asset allocation</h2><div class="card"><div class="donut-wrap">${donut(alloc, 'Worth')}${bars(alloc)}</div></div>` : ''}
+      <div class="section-head"><h2>Holdings</h2><div class="btn-row">${linked ? '<button class="btn small" data-action="refresh-nav">Update NAVs</button>' : ''}<button class="btn small" data-action="add-investment">+ Investment</button></div></div>
       ${listCard(rows, 'No investments yet. Add your SIPs, stocks, FDs and more.')}
       <h2>Added in ${esc(monthLabel(state.month))}</h2>
       ${listCard(thisMonth, 'Nothing added this month. Open a holding to record a contribution.')}`;
@@ -648,11 +718,11 @@ const views = {
   },
 
   plan() {
-    return subnav('plan', { budgets: 'Budgets', bills: 'Bills & recurring', goals: 'Goals', lending: 'Lent & borrowed' }) + planViews[state.planView]();
+    return subnav('plan', { budgets: 'Budgets', bills: 'Bills & recurring', goals: 'Goals', lending: 'Lent & borrowed', loans: 'Loans', policies: 'Insurance & FDs' }) + planViews[state.planView]();
   },
 
   reports() {
-    return subnav('report', { year: 'Year', export: 'Export' }) + reportViews[state.reportView]();
+    return subnav('report', { year: 'Year', summary: 'Monthly summary', trends: 'Trends', networth: 'Net worth', tax: 'Tax', export: 'Export' }) + reportViews[state.reportView]();
   },
 
   search() {
@@ -743,7 +813,141 @@ const planViews = {
       ${listCard(open.map(debtRow), 'Keep track of money you lend to friends and family, or borrow from them.')}
       ${done.length ? `<h2>Settled</h2>${listCard(done.slice(0, 30).map(debtRow), '')}` : ''}`;
   },
+  loans() {
+    const ls = state.loans.map(l => ({ l, ...loanNow(l) })).sort((a, b) => b.left - a.left);
+    return `
+      <div class="grid">${stat('Still to repay', money(sum(ls, x => x.left)), 'spend')}${stat('EMIs each month', money(sum(ls.filter(x => x.left > 0), x => x.emi)))}${stat('Interest paid so far', money(sum(ls, x => x.interestPaid)))}</div>
+      <div class="section-head"><h2>Loans</h2><button class="btn small" data-action="add-loan">+ Loan</button></div>
+      ${listCard(ls.map(loanRow), 'Add your home, car or personal loans to see what is left to pay, the interest so far, and when each one ends.')}
+      ${ls.length ? '<p class="muted small-note">EMIs are assumed paid on schedule. Record any part-prepayment in the loan to see the new end date.</p>' : ''}`;
+  },
+  policies() {
+    const all = state.policies.filter(p => !p.closed).sort((a, b) => (a.next || '9').localeCompare(b.next || '9'));
+    const soon = policiesDue(30);
+    const cover = sum(all.filter(p => p.kind !== 'fd'), p => p.cover || 0);
+    return `
+      <div class="grid">${stat('Insurance cover', money(cover))}${stat('Premiums a year', money(sum(all.filter(p => p.kind !== 'fd'), p => (p.premium || 0) * (12 / (Number(p.every) || 12)))), 'spend')}${stat('Fixed deposits', money(sum(all.filter(p => p.kind === 'fd'), p => p.premium || 0)), 'invest')}</div>
+      <h2>Coming up in the next 30 days</h2>
+      ${listCard(soon.map(p => policyRow(p, true)), 'No renewals or maturities in the next 30 days.')}
+      <div class="section-head"><h2>All policies and deposits</h2><button class="btn small" data-action="add-policy">+ Add</button></div>
+      ${listCard(all.map(p => policyRow(p)), 'Add insurance policies and fixed deposits to get reminders before premiums are due and deposits mature.')}`;
+  },
 };
+
+// ---- loans ----
+function loanNow(l) {
+  const rows = schedule(l);
+  const cur = todayISO().slice(0, 7);
+  const past = rows.filter(r => r.month <= cur);
+  return { rows, emi: l.emi || emi(l.principal, l.rate, l.months), left: past.length ? past.at(-1).balance : l.principal, interestPaid: sum(past, r => r.interest), end: rows.at(-1)?.month || l.start };
+}
+function loanRow(x) {
+  return `<div class="row" data-action="edit-loan" data-id="${x.l.id}">
+    ${avatar(x.l.name)}
+    <div class="main"><div class="title">${esc(x.l.name)}</div><div class="meta">${LOAN_KIND[x.l.kind] || 'Loan'} · EMI ${money(x.emi)} · ${x.left > 0 ? `ends ${esc(monthLabel(x.end, { month: 'short', year: 'numeric' }))}` : 'paid off'}</div></div>
+    <div class="amt spend">${money(x.left)}<div class="meta">left</div></div>
+  </div>`;
+}
+
+// ---- insurance and fixed deposits ----
+const addMonthsISO = (iso, n) => { const m = shiftMonth(iso.slice(0, 7), n); return `${m}-${pad2(Math.min(Number(iso.slice(8)), daysIn(m)))}`; };
+function policiesDue(within) {
+  const today = todayISO();
+  return state.policies.filter(p => !p.closed && p.next && daysBetween(today, p.next) <= within).sort((a, b) => a.next.localeCompare(b.next));
+}
+function policyRow(p, withActions = false) {
+  const days = p.next ? daysBetween(todayISO(), p.next) : null;
+  const fd = p.kind === 'fd';
+  const when = p.next ? (fd ? `matures ${fmtDate(p.next)}` : `${days < 0 ? 'was due' : 'due'} ${fmtDate(p.next)}`) : '';
+  return `<div class="row ${withActions ? 'static due' : ''} ${days !== null && days < 0 ? 'overdue' : days !== null && days <= 7 ? 'soon' : ''}" ${withActions ? '' : `data-action="edit-policy" data-id="${p.id}"`}>
+    ${avatar(p.name)}
+    <div class="main"><div class="title">${esc(p.name)}</div><div class="meta">${POLICY_KIND[p.kind] || ''}${p.provider ? ' · ' + esc(p.provider) : ''}${when ? ' · ' + when : ''}</div></div>
+    <div class="amt ${fd ? 'invest' : ''}">${money(fd ? p.maturity || p.premium : p.premium)}<div class="meta">${fd ? 'at maturity' : FREQ[p.every] ? ({ 1: 'a month', 3: 'a quarter', 6: 'half-yearly', 12: 'a year' })[p.every] : ''}</div></div>
+    ${withActions ? `<div class="row-actions">${fd ? `<button class="btn small primary" data-action="policy-close" data-id="${p.id}">Matured</button>` : `<button class="btn small primary" data-action="policy-paid" data-id="${p.id}">Paid</button>`}<button class="btn small" data-action="edit-policy" data-id="${p.id}">Open</button></div>` : ''}
+  </div>`;
+}
+async function insuranceCategory() {
+  const c = state.categories.find(x => x.kind === 'expense' && x.name.toLowerCase() === 'insurance');
+  return c ? c.id : (await save('categories', { kind: 'expense', name: 'Insurance' })).id;
+}
+
+// ---- net worth ----
+function netWorthNow() {
+  const investments = portfolio().current;
+  const open = state.debts.filter(x => debtLeft(x) > 0.005);
+  const lent = sum(open.filter(x => x.direction === 'lent'), debtLeft), borrowed = sum(open.filter(x => x.direction === 'borrowed'), debtLeft);
+  const loans = sum(state.loans, l => loanNow(l).left);
+  return { investments, lent, loans, borrowed, assets: investments + lent, liabilities: loans + borrowed, net: investments + lent - loans - borrowed };
+}
+// Keeps one net worth figure per month, so the trend builds up over time.
+async function recordNetWorth() {
+  const n = netWorthNow();
+  const m = todayISO().slice(0, 7), v = Math.round(n.net);
+  if ((!n.assets && !n.liabilities) || state.netLog.months?.[m] === v) return;
+  state.netLog = await db.put('settings', { ...state.netLog, months: { ...state.netLog.months, [m]: v } });
+  scheduleSync();
+}
+
+// Simple bar chart of [label, value] pairs; values may be negative. `avg` draws a dashed line.
+function simpleBars(pairs, color = 'var(--invest)', avg = null) {
+  if (!pairs.length) return '';
+  const W = 600, H = 220, pad = 30, gw = W / pairs.length, bw = Math.min(36, gw * 0.6);
+  const max = Math.max(0, ...pairs.map(p => p[1]), avg || 0), min = Math.min(0, ...pairs.map(p => p[1]));
+  const span = max - min || 1, y = v => 8 + ((max - v) / span) * (H - pad - 8);
+  return `<div class="chart"><svg viewBox="0 0 ${W} ${H}" role="img">
+    <line x1="0" x2="${W}" y1="${y(0)}" y2="${y(0)}" stroke="var(--border)"/>
+    ${pairs.map(([l, v], i) => `<g><rect x="${i * gw + (gw - bw) / 2}" y="${Math.min(y(v), y(0))}" width="${bw}" height="${Math.abs(y(v) - y(0))}" rx="3" fill="${v < 0 ? 'var(--danger)' : color}"><title>${esc(l)}: ${money(v)}</title></rect>
+      <text x="${i * gw + gw / 2}" y="${H - 6}" text-anchor="middle">${esc(l)}</text></g>`).join('')}
+    ${avg !== null ? `<line x1="0" x2="${W}" y1="${y(avg)}" y2="${y(avg)}" stroke="var(--muted)" stroke-dasharray="6 6"/>` : ''}
+  </svg></div>`;
+}
+
+// ---- tax helper ----
+// What the app can work out for a financial year starting in April of `fy`.
+function taxAuto(fy) {
+  const from = `${fy}-04`, to = `${fy + 1}-03`;
+  const inFY = d => d && d.slice(0, 7) >= from && d.slice(0, 7) <= to;
+  const fyEntries = state.entries.filter(e => inFY(e.date));
+  const contrib = tag => sum(state.investments.filter(i => i.tax === tag).flatMap(i => (i.contributions || []).filter(c => inFY(c.date))), c => c.amount);
+  const premiums = kinds => sum(fyEntries.filter(e => e.policyId && kinds.includes(state.policies.find(p => p.id === e.policyId)?.kind)), e => e.amount);
+  const homeRows = state.loans.filter(l => l.kind === 'home').flatMap(l => schedule(l).filter(r => r.month >= from && r.month <= to));
+  return {
+    salary: sum(fyEntries.filter(e => e.type === 'salary'), e => e.amount),
+    other: sum(fyEntries.filter(e => e.type === 'income'), e => e.amount),
+    c80: contrib('80C') + premiums(['life', 'term']) + sum(homeRows, r => r.principal),
+    d80: premiums(['health']),
+    nps: contrib('nps'),
+    homeInterest: sum(homeRows, r => r.interest),
+    hra: 0,
+    otherDed: 0,
+  };
+}
+const TAX_FIELDS = {
+  salary: ['Gross salary for the year', 'Use the gross figure from Form 16 or your payslips. The suggestion adds up the salary you recorded, which is usually take-home pay.'],
+  other: ['Other income', 'Interest, rent, freelance and other taxable income.'],
+  c80: ['80C investments', 'PPF, EPF, ELSS, life insurance premiums, home loan principal, tuition fees. Counts up to ₹1.5 lakh.'],
+  d80: ['80D health insurance', 'Health insurance premiums for you, your family and parents.'],
+  nps: ['NPS, 80CCD(1B)', 'Your own extra NPS contribution, up to ₹50,000.'],
+  homeInterest: ['Home loan interest, 24(b)', 'For a house you live in, up to ₹2 lakh.'],
+  hra: ['HRA exemption', 'The exempt part of your house rent allowance.'],
+  otherDed: ['Other deductions', 'For example 80E education loan interest or 80G donations.'],
+};
+function taxResult(fy) {
+  const auto = taxAuto(fy), saved = state.taxInputs.years?.[fy] || {};
+  const v = k => (saved[k] !== undefined && saved[k] !== '' ? Number(saved[k]) : auto[k]);
+  return incomeTax({ salary: v('salary'), other: v('other') }, { c80: v('c80'), d80: v('d80'), d80max: 100000, nps: v('nps'), homeInterest: v('homeInterest'), hra: v('hra'), other: v('otherDed') });
+}
+function taxResultHtml(fy) {
+  const r = taxResult(fy);
+  const better = r.newRegime.tax <= r.oldRegime.tax ? 'new' : 'old', diff = Math.abs(r.newRegime.tax - r.oldRegime.tax);
+  const card = (key, title, x) => `<div class="card regime ${better === key ? 'best' : ''}">
+    <div class="label">${title}${better === key ? ' <span class="badge">Lower</span>' : ''}</div>
+    <div class="value">${money(Math.round(x.tax))}</div>
+    <div class="sub">Taxable income ${money(Math.round(x.taxable))}</div></div>`;
+  return `<div class="grid">${card('new', 'New regime', r.newRegime)}${card('old', 'Old regime', r.oldRegime)}</div>
+    <p class="small-note">${r.gross ? (diff >= 1 ? `The <b>${better} regime</b> saves you about <b>${money(Math.round(diff))}</b> this year.` : 'Both regimes come to the same tax.') : 'Enter your gross salary to see an estimate.'}
+    <span class="muted">Tax shown includes 4% cess. This is an estimate for individuals below 60 using the FY 2025–26 rules; check with your CA before filing.</span></p>`;
+}
 
 // ---- goals ----
 const goalSaved = g => sum(g.saved || [], c => c.amount) + (g.investmentId ? (i => (i ? i.currentValue ?? investedTotal(i) : 0))(state.investments.find(i => i.id === g.investmentId)) : 0);
@@ -872,6 +1076,81 @@ const reportViews = {
       <h2>Top spending in ${esc(label)}</h2>
       <div class="card">${bars(byCategory(spend).slice(0, 8), '', 'No spending recorded in this year.')}</div>`;
   },
+  summary() {
+    const m = state.month, prev = shiftMonth(m, -1);
+    const t = monthTotals(m), p = monthTotals(prev);
+    const change = p.spent ? ((t.spent - p.spent) / p.spent) * 100 : NaN;
+    const top = byCategory(entriesIn(m, 'expense'), state, true).slice(0, 3);
+    const budgets = budgetStatus(m);
+    const over = budgets.filter(b => b.pct > 100), within = budgets.filter(b => b.pct <= 100);
+    const goalsMoved = state.goals.map(g => ({ g, added: sum((g.saved || []).filter(c => c.date.startsWith(m)), c => c.amount) })).filter(x => x.added);
+    const lines = [
+      t.income ? `You earned <b>${money(t.income)}</b> and kept <b>${money(t.saved)}</b>, which is ${Math.round((t.saved / t.income) * 100)}% of it.` : 'No income was recorded this month.',
+      t.spent ? `You spent <b>${money(t.spent)}</b>${isFinite(change) ? `, ${change >= 0 ? 'up' : 'down'} ${Math.abs(change).toFixed(0)}% on ${esc(monthLabel(prev, { month: 'long' }))}` : ''}.` : 'No spending was recorded.',
+      t.invested ? `You invested <b>${money(t.invested)}</b>.` : '',
+      top.length ? `Most went on ${top.map(([n, v]) => `${esc(n)} (${money(v)})`).join(', ')}.` : '',
+      budgets.length ? (over.length ? `${over.length} budget${over.length === 1 ? ' went' : 's went'} over: ${over.map(b => esc(b.name)).join(', ')}.` : `All ${within.length} budget${within.length === 1 ? '' : 's'} stayed within the limit.`) : '',
+      ...goalsMoved.map(x => `You put ${money(x.added)} towards <b>${esc(x.g.name)}</b>.`),
+    ].filter(Boolean);
+    return `
+      <section class="hero">
+        <div class="hero-label">${esc(monthLabel(m))} in short</div>
+        <div class="hero-value">${money(t.saved)}</div>
+        <div class="hero-sub">left over${t.income ? ` · <b>${Math.round((t.saved / t.income) * 100)}%</b> of income kept` : ''}</div>
+      </section>
+      <div class="card summary-lines">${lines.map(l => `<p>${l}</p>`).join('')}</div>
+      <p class="muted small-note">Use the month at the top to see any month's summary.</p>`;
+  },
+  trends() {
+    const cur = todayISO().slice(0, 7);
+    const months = monthsFrom(shiftMonth(cur, -11), 12);
+    const cats = catsOf('expense').filter(c => !parentOf(c.id));
+    const sel = state.trendCat || 'all';
+    const spentIn = m => sum(entriesIn(m, 'expense').filter(e => sel === 'all' || inCat(e, sel)), e => e.amount);
+    const vals = months.map(m => [monthLabel(m, { month: 'short' }), spentIn(m)]);
+    const used = vals.filter(v => v[1] > 0);
+    const avg = used.length ? sum(used, v => v[1]) / used.length : 0;
+    const high = [...vals].sort((a, b) => b[1] - a[1])[0];
+    const now = vals.at(-1)[1];
+    return `
+      <label class="field">Category<select class="inline-input" id="trend-cat"><option value="all">All spending</option>${cats.map(c => `<option value="${c.id}" ${c.id === sel ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
+      <div class="grid" style="margin-top:12px">${stat('This month', money(now), 'spend', avg ? `${pct(((now - avg) / avg) * 100)} vs average` : '')}${stat('Monthly average', money(avg), '', 'Months with spending')}${stat('Highest', money(high[1]), '', high[1] ? esc(high[0]) : '')}</div>
+      <h2>Last 12 months</h2>
+      <div class="card">${simpleBars(vals, 'var(--spend)', avg || null)}<div class="legend"><span><i style="background:var(--spend)"></i>Spent</span><span>– – Average</span></div></div>`;
+  },
+  networth() {
+    const n = netWorthNow();
+    const hist = Object.entries(state.netLog.months || {}).sort().slice(-12).map(([m, v]) => [monthLabel(m, { month: 'short' }), v]);
+    return `
+      <section class="hero">
+        <div class="hero-label">Net worth today</div>
+        <div class="hero-value">${money(n.net)}</div>
+        <div class="hero-sub">What you own minus what you owe</div>
+      </section>
+      <div class="grid quad">
+        ${stat('Investments', money(n.investments), 'invest')}
+        ${stat('Money lent', money(n.lent), 'income')}
+        ${stat('Loans', money(n.loans), 'spend')}
+        ${stat('Money borrowed', money(n.borrowed), 'spend')}
+      </div>
+      <h2>Month by month</h2>
+      <div class="card">${hist.length > 1 ? simpleBars(hist, 'var(--income)') : '<div class="empty">The app records your net worth each month when you open it. The chart fills in from next month.</div>'}</div>
+      <p class="muted small-note">Investments use their current value. Bank balances and property aren't included unless you add them as holdings in Invest.</p>`;
+  },
+  tax() {
+    const fy = state.taxYear ?? fyStart(todayISO().slice(0, 7));
+    state.taxYear = fy;
+    const auto = taxAuto(fy), saved = state.taxInputs.years?.[fy] || {};
+    return `
+      <div class="year-head"><b>Income tax estimate</b>
+        <div class="month-picker"><button class="icon-btn" data-action="tax-year" data-id="-1" aria-label="Previous year">‹</button><span class="month-label">FY ${fy}–${String(fy + 1).slice(2)}</span><button class="icon-btn" data-action="tax-year" data-id="1" aria-label="Next year">›</button></div></div>
+      <div id="tax-results">${taxResultHtml(fy)}</div>
+      <h2>Your figures</h2>
+      <form class="card tax-form" data-form="tax" data-fy="${fy}">
+        ${Object.entries(TAX_FIELDS).map(([k, [label, help]]) => `<label class="field">${label}<input name="${k}" type="number" inputmode="decimal" min="0" step="1" value="${saved[k] ?? ''}" placeholder="${Math.round(auto[k])}"><span class="hint">${help}${auto[k] ? ` Worked out from your records: ${money(Math.round(auto[k]))}.` : ''}</span></label>`).join('')}
+        <p class="muted hint" style="margin:0">Leave a box empty to use the figure worked out from your records (shown faintly). Mark tax-saving holdings in Invest, and life or health policies under Plan → Insurance, to fill these in automatically.</p>
+      </form>`;
+  },
   export() {
     const kinds = { month: monthLabel(state.month), fy: exportRange('fy').label, year: `Calendar year ${state.month.slice(0, 4)}`, all: 'Everything' };
     return `
@@ -971,11 +1250,11 @@ function render() {
   }
   bioPrompted = false;
   document.querySelectorAll('.tabs button, .top-actions button').forEach(b => { if (b.dataset.tab === state.tab) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
-  const urgent = dueSoon().length + debtsDueSoon().length;
+  const urgent = dueSoon().length + debtsDueSoon().length + policiesDue(7).length;
   $('.tabs [data-tab=plan] .tab-badge').textContent = urgent || '';
   $('#month').value = state.month;
   $('#month-text').textContent = monthLabel(state.month, { month: 'short', year: 'numeric' });
-  $('.month-picker').style.visibility = ['settings', 'search', 'reports'].includes(state.tab) ? 'hidden' : '';
+  $('.month-picker').style.visibility = ['settings', 'search'].includes(state.tab) || (state.tab === 'reports' && state.reportView !== 'summary') ? 'hidden' : '';
   $('.fab').hidden = ['family', 'settings', 'reports', 'search'].includes(state.tab);
   $('#view').innerHTML = views[state.tab]();
 }
@@ -1287,6 +1566,120 @@ function debtDialog(debt) {
   });
 }
 
+function loanDialog(loan) {
+  const l = loan || { kind: 'home', start: todayISO().slice(0, 7), emiDay: 5, prepay: [] };
+  const now = loan ? loanNow(loan) : null;
+  const years = now ? [...now.rows.reduce((m, r) => { const y = r.month.slice(0, 4); const a = m.get(y) || { interest: 0, principal: 0, balance: 0 }; a.interest += r.interest; a.principal += r.principal; a.balance = r.balance; return m.set(y, a); }, new Map())] : [];
+  openDialog(`
+    <h3>${loan ? esc(loan.name) : 'Add a loan'}</h3>
+    <div class="two">
+      <label class="field">Kind<select name="kind">${Object.entries(LOAN_KIND).map(([k, v]) => `<option value="${k}" ${k === l.kind ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
+      <label class="field">Name<input name="name" required maxlength="60" value="${esc(l.name || '')}" placeholder="e.g. SBI home loan" ${loan ? '' : 'autofocus'}></label>
+    </div>
+    <div class="two">
+      <label class="field">Loan amount<input name="principal" type="number" inputmode="decimal" min="1" step="1" required value="${l.principal ?? ''}"></label>
+      <label class="field">Interest % a year<input name="rate" type="number" inputmode="decimal" min="0" max="60" step="0.01" required value="${l.rate ?? ''}"></label>
+    </div>
+    <div class="two">
+      <label class="field">Tenure in months<input name="months" type="number" inputmode="numeric" min="1" max="480" step="1" required value="${l.months ?? ''}"></label>
+      <label class="field">First EMI month<input name="start" type="month" required value="${l.start}"></label>
+    </div>
+    <label class="field">EMI (optional)<input name="emi" type="number" inputmode="decimal" min="0" step="1" value="${l.emi ?? ''}" placeholder="${now ? Math.round(now.emi) : 'Worked out for you'}"></label>
+    ${loan ? `
+      <div class="grid loan-stats">${stat('Left to repay', money(now.left), 'spend')}${stat('Interest so far', money(now.interestPaid))}${stat('Ends', esc(monthLabel(now.end, { month: 'short', year: 'numeric' })))}</div>
+      <div class="section-head" style="margin:6px 0 0"><b>Part-prepayments</b></div>
+      <div class="inline-form" style="margin-top:0">
+        <input class="inline-input" name="pAmount" type="number" inputmode="decimal" step="1" min="1" placeholder="Amount">
+        <input class="inline-input" name="pDate" type="date" value="${todayISO()}">
+        <button class="btn" value="prepay" formnovalidate>Add</button>
+      </div>
+      ${(l.prepay || []).map(p => `<div class="row static" style="padding:6px 4px"><div class="main meta">${fmtDate(p.date)}</div><div class="amt">${money(p.amount)}</div><button class="btn small" value="rm:${p.id}" formnovalidate aria-label="Remove">×</button></div>`).join('')}
+      <details><summary>Year-by-year schedule</summary><table class="table"><thead><tr><th>Year</th><th>Interest</th><th>Principal</th><th>Left</th></tr></thead><tbody>${years.map(([y, a]) => `<tr><td>${y}</td><td>${money(a.interest, true)}</td><td>${money(a.principal, true)}</td><td>${money(a.balance, true)}</td></tr>`).join('')}</tbody></table></details>`
+    : `<label class="check"><input type="checkbox" name="remind" checked> Remind me of the EMI each month (in Bills)</label>
+       <label class="field">EMI day of month<input name="emiDay" type="number" min="1" max="31" value="${l.emiDay}"></label>`}
+    ${actions(!!loan)}`,
+  async (fd, action) => {
+    const base = { ...l, kind: fd.get('kind'), name: fd.get('name').trim(), principal: parseFloat(fd.get('principal')), rate: parseFloat(fd.get('rate')),
+      months: Math.round(Number(fd.get('months'))), start: fd.get('start'), emi: parseFloat(fd.get('emi')) || null };
+    if (action === 'delete') {
+      if (!confirm(`Delete ${loan.name}?`)) return false;
+      await drop('loans', loan.id);
+      toast('Loan deleted');
+    } else if (action === 'prepay' || action.startsWith('rm:')) {
+      const amount = parseFloat(fd.get('pAmount'));
+      if (action === 'prepay' && !(amount > 0)) throw new Error('Enter an amount above zero');
+      const prepay = action === 'prepay' ? [...(l.prepay || []), { id: db.uid(), date: fd.get('pDate') || todayISO(), amount }] : l.prepay.filter(p => p.id !== action.slice(3));
+      const rec = await save('loans', { ...base, prepay });
+      render();
+      loanDialog(rec);
+      return false;
+    } else {
+      if (!base.name) throw new Error('Give the loan a name');
+      if (!(base.principal > 0) || !(base.months > 0) || !(base.rate >= 0)) throw new Error('Fill in the amount, interest and tenure');
+      if (base.emi && base.emi <= base.principal * base.rate / 1200) throw new Error('That EMI does not cover the monthly interest');
+      const rec = await save('loans', base);
+      if (!loan && fd.get('remind')) {
+        const cat = state.categories.find(c => c.kind === 'expense' && /emi/i.test(c.name));
+        // Reminders start from the next EMI date; past EMIs are assumed paid.
+        const day = Math.min(31, Math.max(1, Number(fd.get('emiDay')) || 5));
+        const today = todayISO(), lastDue = dueDate({ day }, today.slice(0, 7)) <= today ? today.slice(0, 7) : shiftMonth(today.slice(0, 7), -1);
+        await save('recurring', { name: `${rec.name} EMI`, type: 'expense', amount: Math.round(rec.emi || emi(rec.principal, rec.rate, rec.months)), categoryId: cat?.id || catsOf('expense')[0]?.id,
+          day, every: 1, start: rec.start, mode: 'remind', method: 'bank', doneThrough: lastDue < rec.start ? '' : lastDue });
+      }
+      toast(loan ? 'Saved' : 'Loan added');
+    }
+    render();
+  });
+}
+
+function policyDialog(pol) {
+  const p = pol || { kind: 'health', every: 12 };
+  openDialog(`
+    <h3>${pol ? esc(pol.name) : 'Add insurance or a fixed deposit'}</h3>
+    <label class="field">Kind<select name="kind">${Object.entries(POLICY_KIND).map(([k, v]) => `<option value="${k}" ${k === p.kind ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
+    <div class="two">
+      <label class="field">Name<input name="name" required maxlength="60" value="${esc(p.name || '')}" placeholder="e.g. Family health cover" ${pol ? '' : 'autofocus'}></label>
+      <label class="field">Insurer or bank<input name="provider" maxlength="60" value="${esc(p.provider || '')}"></label>
+    </div>
+    <label class="field">Policy or account number (optional)<input name="number" maxlength="40" value="${esc(p.number || '')}"></label>
+    <div class="two">
+      <label class="field" id="p-amt">Premium<input name="premium" type="number" inputmode="decimal" min="0" step="1" value="${p.premium ?? ''}"></label>
+      <label class="field" id="p-cover">Sum insured<input name="cover" type="number" inputmode="decimal" min="0" step="1" value="${p.cover ?? p.maturity ?? ''}"></label>
+    </div>
+    <div class="two">
+      <label class="field" id="p-every">Premium paid<select name="every">${[[12, 'Yearly'], [6, 'Half-yearly'], [3, 'Quarterly'], [1, 'Monthly']].map(([k, v]) => `<option value="${k}" ${Number(p.every) === k ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
+      <label class="field" id="p-next">Next premium due<input name="next" type="date" value="${p.next || ''}"></label>
+    </div>
+    <label class="field">Note (optional)<input name="note" maxlength="120" value="${esc(p.note || '')}"></label>
+    ${actions(!!pol)}`,
+  async (fd, action) => {
+    if (action === 'delete') {
+      if (!confirm(`Delete ${pol.name}?`)) return false;
+      await drop('policies', pol.id);
+      toast('Deleted');
+    } else {
+      const kind = fd.get('kind'), fdep = kind === 'fd';
+      const amount = parseFloat(fd.get('premium')) || 0, second = parseFloat(fd.get('cover')) || 0;
+      if (!fd.get('name').trim()) throw new Error('Give it a name');
+      await save('policies', { ...p, kind, name: fd.get('name').trim(), provider: fd.get('provider').trim(), number: fd.get('number').trim(), premium: amount,
+        cover: fdep ? 0 : second, maturity: fdep ? second : 0, every: Number(fd.get('every')), next: fd.get('next') || '', note: fd.get('note').trim() });
+      toast('Saved');
+    }
+    render();
+  },
+  form => {
+    const sync = () => {
+      const fdep = form.querySelector('select[name=kind]').value === 'fd';
+      form.querySelector('#p-amt').firstChild.textContent = fdep ? 'Amount deposited' : 'Premium';
+      form.querySelector('#p-cover').firstChild.textContent = fdep ? 'Maturity amount' : 'Sum insured';
+      form.querySelector('#p-next').firstChild.textContent = fdep ? 'Matures on' : 'Next premium due';
+      form.querySelector('#p-every').hidden = fdep;
+    };
+    form.querySelector('select[name=kind]').addEventListener('change', sync);
+    sync();
+  });
+}
+
 function investmentDialog(inv) {
   const i = inv || { contributions: [] };
   const contribs = [...(i.contributions || [])].sort(byDateDesc);
@@ -1294,6 +1687,16 @@ function investmentDialog(inv) {
     <h3>${inv ? esc(inv.name) : 'Add investment'}</h3>
     <label class="field">Name<input name="name" required maxlength="60" value="${esc(i.name || '')}" placeholder="e.g. Nifty 50 index fund" ${inv ? '' : 'autofocus'}></label>
     <label class="field">Type<select name="categoryId">${catsOf('investment').map(c => `<option value="${c.id}" ${c.id === i.categoryId ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
+    <div class="two">
+      <label class="field">Asset class<select name="assetClass">${Object.entries(ASSET).map(([k, l]) => `<option value="${k}" ${k === (inv ? assetClassOf(i) : i.assetClass) ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+      <label class="field">Tax saving<select name="tax"><option value="">None</option><option value="80C" ${i.tax === '80C' ? 'selected' : ''}>80C (ELSS, PPF, EPF…)</option><option value="nps" ${i.tax === 'nps' ? 'selected' : ''}>NPS, 80CCD(1B)</option></select></label>
+    </div>
+    <details class="fund" ${i.schemeCode ? 'open' : ''}><summary>Mutual fund? Update its value from the daily NAV</summary>
+      <div class="inline-form"><input class="inline-input" name="fundQuery" placeholder="Fund name, e.g. parag parikh flexi"><button class="btn" value="fund-search" formnovalidate>Find</button></div>
+      <select class="inline-input" name="schemeCode" style="margin-top:8px"><option value="">Not linked</option>${i.schemeCode ? `<option value="${esc(i.schemeCode)}" selected>${esc(i.schemeName || i.schemeCode)}</option>` : ''}</select>
+      <label class="field" style="margin-top:8px">Units held<input name="units" type="number" inputmode="decimal" step="0.001" min="0" value="${i.units ?? ''}" placeholder="From your fund statement"></label>
+      ${i.nav ? `<p class="muted hint" style="margin:6px 0 0">NAV ${money(i.nav)} on ${esc(fmtDate(i.navDate))}. Updated once a day when you open the app.</p>` : ''}
+    </details>
     ${inv ? '' : `<label class="field">Amount invested now (optional)<input name="initial" type="number" inputmode="decimal" step="0.01" min="0"></label>
     <label class="field">Date<input name="date" type="date" value="${defaultDate()}"></label>`}
     <label class="field">Current value (optional)<input name="currentValue" type="number" inputmode="decimal" step="0.01" min="0" value="${i.currentValue ?? ''}" placeholder="Leave blank to use amount invested"></label>
@@ -1311,7 +1714,19 @@ function investmentDialog(inv) {
     ${actions(!!inv)}`,
   async (fd, action) => {
     const cv = fd.get('currentValue');
-    const base = { ...i, name: fd.get('name').trim(), categoryId: fd.get('categoryId'), currentValue: cv === '' ? null : parseFloat(cv), note: fd.get('note').trim() };
+    const sel = $('#dialog-form select[name=schemeCode]');
+    const units = parseFloat(fd.get('units'));
+    const base = { ...i, name: fd.get('name').trim(), categoryId: fd.get('categoryId'), currentValue: cv === '' ? null : parseFloat(cv), note: fd.get('note').trim(),
+      assetClass: fd.get('assetClass'), tax: fd.get('tax'), schemeCode: fd.get('schemeCode') || '', schemeName: sel.value ? sel.selectedOptions[0].textContent : '', units: units > 0 ? units : null };
+    if (action === 'fund-search') {
+      const q = String(fd.get('fundQuery')).trim();
+      if (q.length < 3) throw new Error('Type at least 3 letters of the fund name');
+      const found = await getJSON(`https://api.mfapi.in/mf/search?q=${encodeURIComponent(q)}`);
+      sel.innerHTML = '<option value="">Not linked</option>' + (found || []).slice(0, 50).map(f => `<option value="${f.schemeCode}">${esc(f.schemeName)}</option>`).join('');
+      if (found?.length) sel.selectedIndex = 1;
+      toast(found?.length ? `${found.length} funds found. Pick yours from the list.` : 'No funds found');
+      return false;
+    }
     if (action === 'delete') {
       if (!confirm(`Delete ${inv.name} and all its contributions?`)) return false;
       await drop('investments', inv.id);
@@ -1332,8 +1747,9 @@ function investmentDialog(inv) {
       if (!base.name) throw new Error('Give the investment a name');
       const initial = parseFloat(fd.get('initial'));
       if (!inv && initial > 0) base.contributions = [{ id: db.uid(), date: fd.get('date') || defaultDate(), amount: initial }];
-      await save('investments', base);
+      const rec = await save('investments', base);
       toast(inv ? 'Saved' : 'Investment added');
+      if (rec.schemeCode && rec.units > 0 && (rec.schemeCode !== i.schemeCode || rec.units !== i.units || !rec.nav)) refreshNav([rec]);
     }
     render();
   });
@@ -1361,7 +1777,7 @@ document.addEventListener('click', async e => {
     case 'next-month': state.month = shiftMonth(state.month, 1); render(); break;
     case 'quick-add':
       if (state.tab === 'investments') investmentDialog();
-      else if (state.tab === 'plan') ({ budgets: budgetDialog, bills: recurringDialog, goals: goalDialog, lending: debtDialog })[state.planView]();
+      else if (state.tab === 'plan') ({ budgets: budgetDialog, bills: recurringDialog, goals: goalDialog, lending: debtDialog, loans: loanDialog, policies: policyDialog })[state.planView]();
       else entryDialog({ type: state.tab === 'income' ? 'income' : 'expense', date: defaultDate() });
       break;
     case 'add-salary': {
@@ -1398,6 +1814,28 @@ document.addEventListener('click', async e => {
       break;
     }
     case 'subview': state[el.dataset.group + 'View'] = id; render(); break;
+    case 'add-loan': loanDialog(); break;
+    case 'edit-loan': loanDialog(state.loans.find(x => x.id === id)); break;
+    case 'add-policy': policyDialog(); break;
+    case 'edit-policy': policyDialog(state.policies.find(x => x.id === id)); break;
+    case 'policy-paid': {
+      const p = state.policies.find(x => x.id === id);
+      if (p.premium > 0) await save('entries', { type: 'expense', amount: p.premium, categoryId: await insuranceCategory(), method: lastMethod(), date: todayISO(), note: `${p.name} premium`, policyId: p.id });
+      await save('policies', { ...p, next: p.next ? addMonthsISO(p.next, Number(p.every) || 12) : '' });
+      toast(`${p.name} premium recorded`);
+      render();
+      break;
+    }
+    case 'policy-close': {
+      const p = state.policies.find(x => x.id === id);
+      await save('policies', { ...p, closed: true });
+      toast(`${p.name} marked as matured`);
+      render();
+      break;
+    }
+    case 'refresh-nav': el.disabled = true; await refreshNav(); break;
+    case 'open-summary': state.tab = 'reports'; state.reportView = 'summary'; state.month = shiftMonth(state.month, -1); render(); window.scrollTo(0, 0); break;
+    case 'tax-year': state.taxYear += Number(id); render(); break;
     case 'add-goal': goalDialog(); break;
     case 'edit-goal': goalDialog(state.goals.find(x => x.id === id)); break;
     case 'add-debt': debtDialog(); break;
@@ -1507,7 +1945,7 @@ document.addEventListener('submit', async e => {
     toast(unlockTries % 5 === 0 ? 'Too many tries. Wait 30 seconds.' : 'Wrong PIN');
     return;
   }
-  if (e.target.closest('[data-form="search"]')) { e.preventDefault(); return; }
+  if (e.target.closest('[data-form="search"], [data-form="tax"]')) { e.preventDefault(); return; }
   const pwForm = e.target.closest('[data-form="password"]');
   if (pwForm) {
     e.preventDefault();
@@ -1537,12 +1975,21 @@ document.addEventListener('submit', async e => {
 });
 
 let unlockTries = 0;
+let taxSaveTimer;
 
 document.addEventListener('input', e => {
   const searchForm = e.target.closest('[data-form="search"]');
   if (searchForm) {
     state.search = Object.fromEntries(new FormData(searchForm));
     $('#search-results').innerHTML = searchResults();
+  }
+  const taxForm = e.target.closest('[data-form="tax"]');
+  if (taxForm) {
+    const fy = Number(taxForm.dataset.fy);
+    state.taxInputs = { ...state.taxInputs, years: { ...state.taxInputs.years, [fy]: Object.fromEntries(new FormData(taxForm)) } };
+    $('#tax-results').innerHTML = taxResultHtml(fy);
+    clearTimeout(taxSaveTimer);
+    taxSaveTimer = setTimeout(async () => { state.taxInputs = await db.put('settings', state.taxInputs); scheduleSync(); }, 800);
   }
   // Unlock as soon as the PIN is complete.
   if (e.target.name === 'pin' && e.target.closest('[data-form="unlock"]') && e.target.value.length === lock.pinLength()) {
@@ -1552,6 +1999,7 @@ document.addEventListener('input', e => {
 
 document.addEventListener('change', async e => {
   if (e.target.name === 'fy') { state.fy = e.target.value === 'fy'; state.reportYear = null; render(); }
+  if (e.target.id === 'trend-cat') { state.trendCat = e.target.value; render(); }
   if (e.target.id === 'bio-toggle') lock.setBiometric(e.target.checked);
   if (e.target.id === 'month' && e.target.value) { state.month = e.target.value; render(); }
   if (e.target.name === 'skin') {
