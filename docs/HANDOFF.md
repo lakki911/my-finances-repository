@@ -52,7 +52,7 @@ The owner is not a developer. Keep instructions to them simple and click-by-clic
 | `sw.js` | Service worker that caches the app shell. **Bump `VERSION` whenever files change**, and add any new file to `SHELL`. |
 | `manifest.webmanifest`, `icons/` | PWA metadata and icons. |
 | `fonts/manrope.woff2` | Bundled font (OFL license alongside it). |
-| `android-app/` | Capacitor project: `package.json`, `capacitor.config.json`, `MainActivity.java` (required by the sign-in plugin), `release.keystore`, and `assets/` for icon and splash sources. The generated `android/` folder and `www/` are not committed; CI creates them. |
+| `android-app/` | Capacitor project: `package.json`, `capacitor.config.json`, `release.keystore`, and `assets/` for icon and splash sources. The generated `android/` folder and `www/` are not committed; CI creates them. |
 | `.github/workflows/android.yml` | Builds and signs the APK and publishes a GitHub release on every push to `main`. |
 | `docs/USER-GUIDE.md` | Plain-language guide for the owner. |
 
@@ -128,7 +128,7 @@ Lessons from the first builds:
 - Investment contributions live inside the investment record, so if two devices edit the same holding at the same time, the later save wins.
 - Some screens still use `confirm()` / `prompt()` (deleting, new category, wipe). These work in browsers and in the Capacitor WebView, but in-app dialogs would look nicer.
 - **Export backup** downloads a file, which works on PC but may not in the Android app. Data is safe in Firebase anyway; use the PC to export a file.
-- Ideas: budgets per category with alerts, recurring expenses, search and filters, CSV export, charts per category over time, and a privacy page so the Google app can be published (which removes the weekly re-sign-in).
+- Ideas: budgets per category with alerts, recurring expenses, search and filters, CSV export, charts per category over time, and an in-app list of family members for admins to manage.
 
 ## 11. History
 
