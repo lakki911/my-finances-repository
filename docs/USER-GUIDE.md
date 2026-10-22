@@ -92,6 +92,7 @@ Family sharing, receipt photos and the device list need updated security rules i
 | Forgot the app lock PIN | Tap **Forgot PIN?** and sign in again with your password. |
 | A family member forgot their password | They tap **Forgot password?** on the sign-in screen. |
 | The PC site still looks old after an update | Refresh the page twice. |
+| The app says "A new version is available" | Tap **Update**. When the download finishes, open it and tap **Update** to install. Your data stays. |
 | A new APK won't install | Delete the old `my-finances.apk` from Downloads and download it again. |
 | Phone and PC show different data | Make sure both are signed in with the same email, then tap **Settings → Sync now** on each. |
 | A fund's value doesn't update | Check the fund and units in the holding, then tap **Update NAVs** in Invest. |

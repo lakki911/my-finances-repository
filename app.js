@@ -6,6 +6,7 @@ import { toCSV, toXLSX, saveFile } from './exporter.js';
 import { xirr, emi, schedule, incomeTax } from './finance.js';
 import * as i18n from './i18n.js';
 import { ADMIN_EMAILS } from './config.js';
+import { BUILD } from './build.js';
 
 const DEFAULT_CATEGORIES = {
   income: ['Freelance', 'Bonus', 'Interest', 'Rent', 'Gift', 'Other'],
@@ -2480,12 +2481,34 @@ document.addEventListener('change', async e => {
 
 window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); installPrompt = e; if (state.tab === 'settings') render(); });
 
+// ---------- app updates (Android) ----------
+
+// The Android app doesn't update itself, so it checks the latest GitHub release
+// (tagged v1.<build>) and offers the new APK. Checked at launch and then at most every 6 hours.
+const APK_URL = 'https://github.com/lakki911/my-finances-repository/releases/latest/download/my-finances.apk';
+let updateCheckedAt = 0;
+async function checkForUpdate() {
+  if (!BUILD || !window.Capacitor?.isNativePlatform?.() || Date.now() - updateCheckedAt < 6 * 3600_000) return;
+  updateCheckedAt = Date.now();
+  try {
+    const rel = await getJSON('https://api.github.com/repos/lakki911/my-finances-repository/releases/latest');
+    const latest = Number(String(rel?.tag_name || '').split('.')[1]);
+    if (!(latest > BUILD)) return;
+    const bar = $('#update-bar');
+    bar.innerHTML = `<span><b>A new version (1.${latest}) is available.</b> You have 1.${BUILD}.</span>
+      <a class="btn small primary" href="${APK_URL}">Update</a>`;
+    bar.hidden = false;
+    i18n.translate(bar);
+  } catch {} // no internet: try again next time
+}
+
 // ---------- start ----------
 
 if (TABS.includes(location.hash.slice(1))) state.tab = location.hash.slice(1);
 lock.biometricAvailable().then(ok => { state.bioAvailable = ok; if (ok && state.tab === 'settings') render(); });
 const shortcut = new URLSearchParams(location.search).get('add');
 checkIdle();
+checkForUpdate();
 markActive();
 ['click', 'keydown', 'touchstart'].forEach(t => document.addEventListener(t, markActive, { passive: true }));
 setInterval(checkIdle, 60_000);
@@ -2499,6 +2522,7 @@ if (auth.current()) {
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') return lock.onHidden();
   checkIdle();
+  checkForUpdate();
   if (!auth.current()) return;
   if (lock.onVisible()) render();
   runSync(false);

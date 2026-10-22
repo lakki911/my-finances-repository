@@ -43,6 +43,8 @@ jobs:
           cp node_modules/@capacitor/core/dist/capacitor.js www/
           sed -i 's|<script type="module" src="app.js"></script>|<script src="capacitor.js"></script>\n  <script type="module" src="app.js"></script>|' www/index.html
           grep -q 'src="capacitor.js"' www/index.html
+          # Let the app compare itself with the latest release.
+          echo "export const BUILD = ${{ github.run_number }};" > www/build.js
 
       - run: npx cap add android
 
