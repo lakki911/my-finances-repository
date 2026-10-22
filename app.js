@@ -175,12 +175,27 @@ async function load() {
   state.netLog = settings.find(s => s.id === 'networth') || { id: 'networth', months: {} };
   state.taxInputs = settings.find(s => s.id === 'tax') || { id: 'tax', years: {} };
   if (prefs) state.settings = prefs;
-  if (!prefs) {
-    // First run: seed default categories.
-    for (const [kind, names] of Object.entries(DEFAULT_CATEGORIES)) {
-      for (const name of names) state.categories.push(await db.put('categories', { kind, name }, { seed: true }));
+  if (!prefs) state.settings = await db.put('settings', state.settings, { seed: true });
+  // Seed the default categories of any kind that has none (first run, or an account
+  // that lost them). Fixed ids, so two devices seeding at once don't make duplicates.
+  for (const [kind, names] of Object.entries(DEFAULT_CATEGORIES)) {
+    if (state.categories.some(c => c.kind === kind)) continue;
+    for (const [i, name] of names.entries()) {
+      const id = `default-${kind}-${i}`;
+      // A deleted default comes back as a fresh record, so the old delete can't win the next sync.
+      const dead = await db.get('categories', id);
+      state.categories.push(await db.put('categories', { id, kind, name }, { seed: !dead }));
     }
-    state.settings = await db.put('settings', state.settings, { seed: true });
+    if (prefs) scheduleSync();
+  }
+  // A default seeded here before the first sync is dropped when the account already has
+  // a category of the same name (saved by an older version or another device).
+  const key = c => `${c.kind}|${c.name.toLowerCase()}`;
+  const twins = new Set(state.categories.filter(c => !c.id.startsWith('default-')).map(key));
+  const used = new Set(['entries', 'investments', 'budgets', 'recurring', 'templates'].flatMap(s => state[s].map(r => r.categoryId)));
+  for (const c of state.categories.filter(c => c.id.startsWith('default-') && twins.has(key(c)) && !used.has(c.id))) {
+    await db.remove('categories', c.id);
+    state.categories = state.categories.filter(x => x.id !== c.id);
   }
 }
 
