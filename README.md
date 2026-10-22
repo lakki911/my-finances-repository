@@ -1,29 +1,13 @@
 # My Finances
 
-Live app: https://lakki911.github.io/my-finances-repository/
+Personal finance tracker for salary, other income, spending and investments. It runs on PC and Android, works offline, and syncs through your own Google Drive.
 
-A personal finance app that runs in any browser on PC and installs on Android as an app. Works offline. Data stays on your device.
+- **Open on PC:** https://lakki911.github.io/my-finances-repository/
+- **Android APK:** https://github.com/lakki911/my-finances-repository/releases/latest/download/my-finances.apk
 
-## What it tracks
-- **Salary** each month (one tap to repeat last month's amount)
-- **Other income** under your own categories
-- **Spending** under your own categories
-- **Investments**: holdings, contributions over time, current value, gain/loss
-- **Overview**: monthly totals, what's left over, 6-month trend, spending by category, portfolio
+## Docs
+- [User guide](docs/USER-GUIDE.md): how to use the app day to day.
+- [Developer handoff](docs/HANDOFF.md): full context for continuing development (architecture, data model, sync, build, setup values, history).
 
-## Run it
-It must be served over http(s) (opening `index.html` directly from disk won't work).
-
-- **On your PC, quickly:** in this folder run `python -m http.server 8000`, then open http://localhost:8000
-- **On your phone:** host the folder on any static HTTPS host (GitHub Pages, Netlify, Cloudflare Pages). Open the link in Chrome on Android and choose **Install app** / **Add to Home screen**.
-
-## Your data
-Stored in the browser's IndexedDB on each device. Use **Settings → Export backup** regularly, and **Import backup** on another device to move data. Imports merge: the newer version of each record wins.
-
-Every record has an `id`, `updatedAt` and a `deleted` flag, so cloud sync can be added later without changing the data format.
-
-## Files
-`index.html`, `styles.css`, `app.js` (UI), `db.js` (storage), `sw.js` (offline cache; bump `VERSION` after changing files), `manifest.webmanifest`, `icons/`.
-
-## Later: real APK
-Wrap this folder with Capacitor (`npx cap add android`) to build an `.apk` without changing the app code.
+## Quick start for developers
+Run `python -m http.server 8000` in this folder and open http://localhost:8000. Push to `main` to release: GitHub Pages updates the website, and GitHub Actions builds the APK. See the handoff doc before changing anything.
