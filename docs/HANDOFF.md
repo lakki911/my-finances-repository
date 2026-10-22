@@ -50,7 +50,7 @@ All JavaScript files must stay in the repo root: the APK build copies `../*.js`.
 |---|---|
 | `index.html` | App shell: top bar (month picker, search and settings buttons), `<main id="view">`, floating + button, tab bar, `<dialog>`, toast. |
 | `app.js` | All UI (~2,500 lines): state, views per tab and sub-view, dialogs, event delegation via `data-action`, recurring posting, budgets, insights, family sharing, idle sign-out. |
-| `db.js` | IndexedDB layer (`DB_VERSION` 2): `all`, `get`, `put`, `remove` (soft delete), `exportAll`, `importAll` (merge), `wipe`, `readLegacy`. `STORES` lists every store. |
+| `db.js` | IndexedDB layer (`DB_VERSION` 3): `all`, `get`, `put`, `remove` (soft delete), `exportAll`, `importAll` (merge), `wipe`, `readLegacy`. `STORES` lists every store. |
 | `auth.js` | Firebase Authentication REST: register (+ verification email), login, password reset, change password, token refresh, `isAdmin()`. Session in `localStorage['auth.session']`. |
 | `cloud.js` | Firestore REST: `syncNow` (own data), `family()` (admin/co-admin reads everyone), shared family space (`roles`, `setRole`, `getShared`, `mergeShared`, `publishTotals`, `people`), receipts, devices. |
 | `finance.js` | Pure maths: `xirr`, `emi`, `schedule` (loan amortisation with prepayments), `incomeTax` (India, Budget 2025 slabs, old vs new regime). |
@@ -74,7 +74,7 @@ entries     { id, type: 'salary'|'income'|'expense', amount /* home currency */,
               method: 'upi'|'cash'|'card'|'bank'|'other'|'', tags: [..], orig: { currency, amount, rate } | null,
               receipt: bool, recurringId?, policyId? }
 categories  { id, kind: 'income'|'expense'|'investment', name, parentId? /* one level of sub-categories */ }
-investments { id, name, categoryId, currentValue|null, contributions: [{ id, date, amount }], note,
+investments { id, name, categoryId, currentValue|null, contributions: [{ id, date, amount (negative = withdrawal), opening? }], note,
               assetClass, tax: '80C'|'nps'|'', schemeCode, schemeName, units, nav, navDate }
 settings    { id: 'prefs', currency } · { id: 'networth', months: { 'YYYY-MM': value } } · { id: 'tax', years: { [fyStart]: {inputs} } }
 budgets     { id, categoryId | 'all', amount, rollover, since: 'YYYY-MM' }
@@ -85,6 +85,7 @@ debts       { id, direction: 'lent'|'borrowed', person, amount, date, due, note,
 loans       { id, kind, name, principal, rate, months, start: 'YYYY-MM', emi?, prepay: [{ id, date, amount }] }
 policies    { id, kind: 'life'|'term'|'health'|'vehicle'|'fd'|'other', name, provider, number, premium, cover, maturity, every, next, closed }
 templates   { id, name, type, amount, categoryId, method, note, tags }   // quick-add buttons
+savings     { id, name, note, moves: [{ id, date, amount }] }          // money set aside; negative = taken out; never in monthly totals
 ```
 
 - Recurring items post entries with id `<ruleId>-<YYYY-MM>` (and contributions with the same id), so two devices never double-post; a deleted entry's tombstone stops it coming back. `runRecurring()` runs after every sync.
@@ -150,6 +151,7 @@ On every push to `main` (Markdown-only changes skipped), one build at a time:
 
 | Date | Change |
 |---|---|
+| 2026-10-22 | Savings store (Plan → Savings, Overview, net worth). Investment withdrawals (negative contributions) and `opening` contributions kept out of monthly totals. Android update bar (`build.js` BUILD written by the workflow, compared with the latest release tag). Default categories reseeded with fixed ids when a kind is empty. Request timeouts; sign-out no longer waits on a stuck sync. |
 | 2026-10-22 | Family sharing (family budgets, goals, split expenses, roles, activity), other currencies, Auto look, Hindi, idle sign-out, device list, receipt photos. New `firestore.rules` to be pasted by the owner. |
 | 2026-10-22 | Asset allocation, XIRR, mutual fund NAV, loans, insurance and FDs, net worth, trends, tax estimate, monthly summary. |
 | 2026-10-22 | Savings goals, budget rollover, spending alerts, sub-categories, tags, lending and borrowing, quick-add buttons and home-screen shortcuts. |
