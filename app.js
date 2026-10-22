@@ -10,7 +10,7 @@ import { ADMIN_EMAILS } from './config.js';
 const DEFAULT_CATEGORIES = {
   income: ['Freelance', 'Bonus', 'Interest', 'Rent', 'Gift', 'Other'],
   expense: ['Rent / EMI', 'Groceries', 'Food & dining', 'Transport', 'Bills & utilities', 'Shopping', 'Health', 'Entertainment', 'Other'],
-  investment: ['Mutual fund / SIP', 'Stocks', 'Fixed deposit', 'PPF / EPF', 'Gold', 'Crypto', 'Other'],
+  investment: ['Mutual fund / SIP', 'Stocks', 'Fixed deposit', 'PPF / EPF', 'Gold', 'Crypto', 'Other', 'Savings / cash'],
 };
 const CURRENCIES = ['INR', 'USD', 'EUR', 'GBP', 'AED', 'SAR', 'CAD', 'AUD', 'SGD', 'JPY'];
 const TYPE_LABEL = { salary: 'Salary', income: 'Other income', expense: 'Spending' };
@@ -864,7 +864,7 @@ const views = {
       .sort(byDateDesc)
       .map(c => `<div class="row" data-action="edit-investment" data-id="${c.inv.id}">
         <div class="main"><div class="title">${esc(c.inv.name)}</div><div class="meta">${fmtDate(c.date)}</div></div>
-        <div class="amt invest">${money(c.amount)}</div></div>`);
+        <div class="amt ${c.amount < 0 ? 'spend' : 'invest'}">${c.amount < 0 ? `Withdrawn ${money(-c.amount)}` : money(c.amount)}</div></div>`);
     return `
       <div class="grid">
         ${stat('Total invested', money(p.invested), 'invest')}
@@ -1162,7 +1162,7 @@ function taxAuto(fy) {
   const from = `${fy}-04`, to = `${fy + 1}-03`;
   const inFY = d => d && d.slice(0, 7) >= from && d.slice(0, 7) <= to;
   const fyEntries = state.entries.filter(e => inFY(e.date));
-  const contrib = tag => sum(state.investments.filter(i => i.tax === tag).flatMap(i => (i.contributions || []).filter(c => inFY(c.date))), c => c.amount);
+  const contrib = tag => sum(state.investments.filter(i => i.tax === tag).flatMap(i => (i.contributions || []).filter(c => c.amount > 0 && inFY(c.date))), c => c.amount);
   const premiums = kinds => sum(fyEntries.filter(e => e.policyId && kinds.includes(state.policies.find(p => p.id === e.policyId)?.kind)), e => e.amount);
   const homeRows = state.loans.filter(l => l.kind === 'home').flatMap(l => schedule(l).filter(r => r.month >= from && r.month <= to));
   return {
@@ -2110,14 +2110,15 @@ function investmentDialog(inv) {
     <label class="field">Date<input name="date" type="date" value="${defaultDate()}"></label>`}
     <label class="field">Current value (optional)<input name="currentValue" type="number" inputmode="decimal" step="0.01" min="0" value="${i.currentValue ?? ''}" placeholder="Leave blank to use amount invested"></label>
     ${inv ? `
-      <div class="section-head" style="margin:6px 0 0"><b>Contributions</b><span class="muted">${money(investedTotal(i))} total</span></div>
-      <div class="inline-form" style="margin-top:0">
+      <div class="section-head" style="margin:6px 0 0"><b>Money in and out</b><span class="muted">${money(investedTotal(i))} put in, after withdrawals</span></div>
+      <div class="inline-form money-move" style="margin-top:0">
         <input class="inline-input" name="cAmount" type="number" inputmode="decimal" step="0.01" min="0.01" placeholder="Amount">
         <input class="inline-input" name="cDate" type="date" value="${defaultDate()}">
         <button class="btn" value="contribute" formnovalidate>Add</button>
+        <button class="btn" value="withdraw" formnovalidate>Withdraw</button>
       </div>
       <div style="max-height:180px;overflow:auto">${contribs.map(c => `<div class="row" style="padding:8px 4px;cursor:default">
-        <div class="main meta">${fmtDate(c.date)} ${c.date.slice(0, 4)}</div><div class="amt invest">${money(c.amount)}</div>
+        <div class="main meta">${fmtDate(c.date)} ${c.date.slice(0, 4)}</div><div class="amt ${c.amount < 0 ? 'spend' : 'invest'}">${c.amount < 0 ? `Withdrawn ${money(-c.amount)}` : money(c.amount)}</div>
         <button class="btn small" value="rm:${c.id}" formnovalidate aria-label="Remove">×</button></div>`).join('') || '<div class="empty">No contributions yet.</div>'}</div>` : ''}
     <label class="field">Note (optional)<input name="note" maxlength="120" value="${esc(i.note || '')}"></label>
     ${actions(!!inv)}`,
@@ -2146,6 +2147,18 @@ function investmentDialog(inv) {
       const saved = await save('investments', { ...base, contributions: [...(i.contributions || []), { id: db.uid(), date: fd.get('cDate') || defaultDate(), amount }] });
       render();
       investmentDialog(saved); // reopen with the new contribution listed
+      return false;
+    } else if (action === 'withdraw') {
+      // Stored as a negative contribution, so totals, this month's figures and returns all net it off.
+      const amount = parseFloat(fd.get('cAmount'));
+      if (!(amount > 0)) throw new Error('Enter an amount above zero');
+      const have = base.currentValue ?? investedTotal(i);
+      if (amount > have + 0.005 && !confirm(`That's more than the ${money(have)} this holding is worth. Withdraw anyway?`)) return false;
+      const saved = await save('investments', { ...base, currentValue: base.currentValue == null ? null : Math.max(0, base.currentValue - amount),
+        contributions: [...(i.contributions || []), { id: db.uid(), date: fd.get('cDate') || defaultDate(), amount: -amount }] });
+      toast(saved.schemeCode ? `Withdrew ${money(amount)}. Also update Units held for the new value.` : `Withdrew ${money(amount)}`);
+      render();
+      investmentDialog(saved);
       return false;
     } else if (action.startsWith('rm:')) {
       const saved = await save('investments', { ...base, contributions: i.contributions.filter(c => c.id !== action.slice(3)) });

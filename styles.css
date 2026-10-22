@@ -395,3 +395,7 @@ details .table { margin-top: 8px; }
 fieldset.split-who { border: 0; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 8px; }
 fieldset.split-who legend { padding: 0; margin-bottom: 6px; }
 .role-select { width: auto; max-width: 48%; font-size: 14px; padding: 6px 10px; }
+/* Holding dialog: amount and date on one line, Add and Withdraw below on narrow screens. */
+.money-move { flex-wrap: wrap; }
+.money-move .inline-input { flex: 1 1 40%; min-width: 0; }
+.money-move .btn { flex: 1 1 auto; }
