@@ -81,8 +81,23 @@ const methodOptions = selected => `<option value="">Not set</option>` + Object.e
 const defaultDate = () => (todayISO().startsWith(state.month) ? todayISO() : `${state.month}-01`);
 
 // Helpers take an optional dataset `d` so the Family tab can reuse them for other members.
-const catName = (id, d = state) => d.categories.find(c => c.id === id)?.name || 'Uncategorized';
-const catsOf = kind => state.categories.filter(c => c.kind === kind).sort((a, b) => a.name.localeCompare(b.name));
+// Categories can have one level of sub-categories (parentId), shown as "Food › Swiggy".
+const catById = (id, d = state) => d.categories.find(c => c.id === id);
+const parentOf = (id, d = state) => { const p = catById(id, d)?.parentId; return p && catById(p, d) ? p : null; };
+const catName = (id, d = state) => {
+  const c = catById(id, d);
+  if (!c) return 'Uncategorized';
+  const p = parentOf(id, d);
+  return p ? `${catById(p, d).name} › ${c.name}` : c.name;
+};
+const topCatId = (id, d = state) => parentOf(id, d) || id;
+const inCat = (e, catId, d = state) => e.categoryId === catId || parentOf(e.categoryId, d) === catId;
+const byName = (a, b) => a.name.localeCompare(b.name);
+// Categories of a kind, each top-level one followed by its sub-categories.
+function catsOf(kind) {
+  const all = state.categories.filter(c => c.kind === kind);
+  return all.filter(c => !parentOf(c.id)).sort(byName).flatMap(p => [p, ...all.filter(c => c.parentId === p.id).sort(byName)]);
+}
 const entriesIn = (month, type, d = state) => d.entries.filter(e => e.date.startsWith(month) && (!type || e.type === type));
 const investedIn = (month, d = state) => sum(d.investments.flatMap(i => i.contributions || []).filter(c => c.date.startsWith(month)), c => c.amount);
 const investedTotal = inv => sum(inv.contributions || [], c => c.amount);
@@ -96,19 +111,29 @@ function monthTotals(month, d = state) {
   return { salary, other, income, spent, invested, saved: income - spent - invested };
 }
 
-function byCategory(list, d = state) {
+// With `rollup`, sub-categories count towards their parent.
+function byCategory(list, d = state, rollup = false) {
   const map = new Map();
-  for (const e of list) map.set(catName(e.categoryId, d), (map.get(catName(e.categoryId, d)) || 0) + e.amount);
+  for (const e of list) {
+    const key = catName(rollup ? topCatId(e.categoryId, d) : e.categoryId, d);
+    map.set(key, (map.get(key) || 0) + e.amount);
+  }
   return [...map.entries()].sort((a, b) => b[1] - a[1]);
 }
 
-function toast(msg) {
+// `action` adds a button to the toast, e.g. { label: 'Undo', run() {…} }.
+function toast(msg, action) {
   const t = $('#toast');
-  t.textContent = msg;
+  t.innerHTML = esc(msg) + (action ? ` <button class="toast-btn">${esc(action.label)}</button>` : '');
+  if (action) t.querySelector('button').onclick = () => { t.classList.remove('show'); action.run(); };
+  t.classList.toggle('actionable', !!action);
   t.classList.add('show');
   clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => t.classList.remove('show'), 2200);
+  toast.timer = setTimeout(() => t.classList.remove('show'), action ? 5000 : 2600);
 }
+
+const parseTags = s => [...new Set(String(s || '').split(/[\s,]+/).map(t => t.replace(/^#+/, '').toLowerCase()).filter(Boolean))].slice(0, 10);
+const monthDiff = (a, b) => (Number(b.slice(0, 4)) - Number(a.slice(0, 4))) * 12 + Number(b.slice(5, 7)) - Number(a.slice(5, 7));
 
 // ---------- data ----------
 
@@ -233,10 +258,20 @@ function upcoming() {
 }
 const dueSoon = (within = 3) => upcoming().filter(u => u.r.mode === 'remind' && u.days <= within);
 
+const budgetSpent = (b, month) => sum(entriesIn(month, 'expense').filter(e => b.categoryId === 'all' || inCat(e, b.categoryId)), e => e.amount);
+// With rollover, money left unspent in earlier months (since the budget began, up to 2 years) adds to this month's limit.
+function budgetLimit(b, month) {
+  if (!b.rollover || !b.since || month <= b.since) return b.amount;
+  let carry = 0;
+  for (let m = b.since < shiftMonth(month, -24) ? shiftMonth(month, -24) : b.since; m < month; m = shiftMonth(m, 1)) carry = Math.max(0, b.amount + carry - budgetSpent(b, m));
+  return b.amount + carry;
+}
+
 function budgetStatus(month) {
   return state.budgets.map(b => {
-    const spent = sum(entriesIn(month, 'expense').filter(e => b.categoryId === 'all' || e.categoryId === b.categoryId), e => e.amount);
-    return { b, name: b.categoryId === 'all' ? 'All spending' : catName(b.categoryId), spent, pct: b.amount ? (spent / b.amount) * 100 : 0 };
+    const spent = budgetSpent(b, month);
+    const limit = budgetLimit(b, month);
+    return { b, name: b.categoryId === 'all' ? 'All spending' : catName(b.categoryId), spent, limit, carry: limit - b.amount, pct: limit ? (spent / limit) * 100 : 0 };
   }).sort((x, y) => (x.b.categoryId === 'all' ? -1 : y.b.categoryId === 'all' ? 1 : y.pct - x.pct));
 }
 
@@ -300,7 +335,7 @@ function entryRow(e, d) {
   const title = e.type === 'salary' ? 'Salary' : catName(e.categoryId, d);
   return `<div class="row${d === state ? '' : ' static'}" ${d === state ? `data-action="edit-entry" data-id="${e.id}"` : ''}>
     ${avatar(title)}
-    <div class="main"><div class="title">${esc(title)}</div><div class="meta">${[fmtDate(e.date), METHODS[e.method], e.note && esc(e.note)].filter(Boolean).join(' · ')}</div></div>
+    <div class="main"><div class="title">${esc(title)}</div><div class="meta">${[fmtDate(e.date), METHODS[e.method], e.note && esc(e.note), (e.tags || []).map(t => '#' + esc(t)).join(' ')].filter(Boolean).join(' · ')}</div></div>
     <div class="amt ${cls}">${e.type === 'expense' ? '−' : '+'}${money(e.amount)}</div>
   </div>`;
 }
@@ -365,12 +400,12 @@ function portfolio(d = state) {
 const subnav = (group, options) => `<div class="subnav">${Object.entries(options).map(([k, l]) =>
   `<button class="chip-btn" data-action="subview" data-group="${group}" data-id="${k}" ${state[group + 'View'] === k ? 'aria-current="true"' : ''}>${l}</button>`).join('')}</div>`;
 
-function budgetBar({ b, name, spent, pct }) {
-  const left = b.amount - spent;
+function budgetBar({ b, name, spent, limit, carry, pct }) {
+  const left = limit - spent;
   return `<div class="budget ${pct > 100 ? 'over' : pct >= 80 ? 'near' : ''}" data-action="edit-budget" data-id="${b.id}">
-    <div class="bar-top"><span><b>${esc(name)}</b></span><span>${money(spent)} <span class="muted">of ${money(b.amount)}</span></span></div>
+    <div class="bar-top"><span><b>${esc(name)}</b></span><span>${money(spent)} <span class="muted">of ${money(limit)}</span></span></div>
     <div class="bar-track"><div class="bar-fill" style="width:${Math.min(pct, 100)}%"></div></div>
-    <div class="budget-meta">${left >= 0 ? `${money(left)} left` : `${money(-left)} over budget`} · ${Math.round(pct)}%</div>
+    <div class="budget-meta">${left >= 0 ? `${money(left)} left` : `${money(-left)} over budget`} · ${Math.round(pct)}%${carry > 0 ? ` · includes ${money(carry)} carried over` : ''}</div>
   </div>`;
 }
 
@@ -462,9 +497,11 @@ const views = {
     const t = monthTotals(state.month);
     const rate = t.income ? (t.saved / t.income) * 100 : NaN;
     const p = portfolio();
-    const spendCats = byCategory(entriesIn(state.month, 'expense'));
+    const spendCats = byCategory(entriesIn(state.month, 'expense'), state, true);
     const due = dueSoon();
+    const debtsDue = debtsDueSoon();
     const budgets = budgetStatus(state.month);
+    const tips = insights();
     return `
       <section class="hero">
         <div class="hero-label">Left over in ${esc(monthLabel(state.month, { month: 'long' }))}</div>
@@ -483,7 +520,9 @@ const views = {
         ${stat('Spending', money(t.spent), 'spend')}
         ${stat('Invested', money(t.invested), 'invest')}
       </div>
-      ${due.length ? `<div class="section-head"><h2>Due soon</h2><button class="btn small" data-tab="plan" data-plan="bills">All bills</button></div>${listCard(due.map(dueRow), '')}` : ''}
+      ${state.templates.length ? `<h2>Quick add</h2><div class="quick">${[...state.templates].sort(byName).map(q => `<button class="chip-btn" data-action="quick-template" data-id="${q.id}">${esc(q.name)} · ${money(q.amount)}</button>`).join('')}</div>` : ''}
+      ${tips.length ? `<div class="card tips">${tips.map(x => `<p class="tip">${x}</p>`).join('')}</div>` : ''}
+      ${due.length || debtsDue.length ? `<div class="section-head"><h2>Due soon</h2><button class="btn small" data-tab="plan" data-plan="bills">All bills</button></div>${listCard([...due.map(dueRow), ...debtsDue.map(debtRow)], '')}` : ''}
       ${budgets.length ? `<div class="section-head"><h2>Budgets</h2><button class="btn small" data-tab="plan" data-plan="budgets">Manage</button></div>
         <div class="card budgets">${budgets.slice(0, 4).map(budgetBar).join('')}</div>` : ''}
       <h2>Where the money went</h2>
@@ -569,9 +608,10 @@ const views = {
     const catBlock = (kind, title) => `
       <h2>${title}</h2>
       <div class="card">
-        <div class="chips">${catsOf(kind).map(c => `<span class="chip">${esc(c.name)}<button data-action="delete-category" data-id="${c.id}" aria-label="Remove ${esc(c.name)}">×</button></span>`).join('') || '<span class="muted">No categories.</span>'}</div>
+        <div class="chips">${catsOf(kind).map(c => `<span class="chip ${parentOf(c.id) ? 'sub' : ''}">${esc(catName(c.id))}<button data-action="delete-category" data-id="${c.id}" aria-label="Remove ${esc(catName(c.id))}">×</button></span>`).join('') || '<span class="muted">No categories.</span>'}</div>
         <form class="inline-form" data-form="add-category" data-kind="${kind}">
           <input class="inline-input" name="name" placeholder="New category" maxlength="40" required>
+          ${kind === 'investment' ? '' : `<select class="inline-input parent-select" name="parentId" aria-label="Sub-category of"><option value="">Main category</option>${catsOf(kind).filter(c => !parentOf(c.id)).map(c => `<option value="${c.id}">Under ${esc(c.name)}</option>`).join('')}</select>`}
           <button class="btn">Add</button>
         </form>
       </div>`;
@@ -583,6 +623,11 @@ const views = {
           <button class="btn small" data-action="${lock.enabled() ? 'pin-off' : 'pin-set'}">${lock.enabled() ? 'Turn off' : 'Set a PIN'}</button></div>
         ${lock.enabled() ? `<div class="setting"><div><b>Change PIN</b></div><button class="btn small" data-action="pin-change">Change</button></div>` : ''}
         ${lock.enabled() && state.bioAvailable ? `<label class="setting"><div><b>Fingerprint or face unlock</b><div class="muted">Unlock without typing the PIN.</div></div><input type="checkbox" class="switch" id="bio-toggle" ${lock.biometricOn() ? 'checked' : ''}></label>` : ''}
+      </div>
+      <h2>Quick-add buttons</h2>
+      <div class="card">
+        ${state.templates.length ? `<div class="chips">${[...state.templates].sort(byName).map(q => `<span class="chip">${esc(q.name)} · ${money(q.amount)}<button data-action="delete-template" data-id="${q.id}" aria-label="Remove ${esc(q.name)}">×</button></span>`).join('')}</div>` : ''}
+        <p class="muted" style="margin:${state.templates.length ? '12px' : '0'} 0 0">${state.templates.length ? 'They appear on the Overview. One tap adds the entry for today.' : 'When you add an entry, tick "Also save as a quick-add button". It then appears on the Overview, and one tap adds it for today.'}</p>
       </div>
       <h2>Look</h2>
       <div class="card"><div class="seg" role="radiogroup" aria-label="Look">${Object.entries(SKINS).map(([k, l]) => `<label><input type="radio" name="skin" value="${k}" ${document.documentElement.dataset.skin === k ? 'checked' : ''}>${l}</label>`).join('')}</div></div>
@@ -603,7 +648,7 @@ const views = {
   },
 
   plan() {
-    return subnav('plan', { budgets: 'Budgets', bills: 'Bills & recurring' }) + planViews[state.planView]();
+    return subnav('plan', { budgets: 'Budgets', bills: 'Bills & recurring', goals: 'Goals', lending: 'Lent & borrowed' }) + planViews[state.planView]();
   },
 
   reports() {
@@ -618,7 +663,7 @@ const views = {
         <input class="inline-input" type="search" name="q" placeholder="Search notes, categories or amounts" value="${esc(f.q || '')}" autofocus>
         <div class="filters">
           <label class="mini">Type<select class="inline-input" name="type">${opt('', 'All', f.type)}${Object.entries(TYPE_LABEL).map(([k, l]) => opt(k, l, f.type)).join('')}</select></label>
-          <label class="mini">Category<select class="inline-input" name="cat">${opt('', 'All', f.cat)}${['expense', 'income'].flatMap(k => catsOf(k).map(c => opt(c.id, c.name, f.cat))).join('')}</select></label>
+          <label class="mini">Category<select class="inline-input" name="cat">${opt('', 'All', f.cat)}${['expense', 'income'].flatMap(k => catsOf(k).map(c => opt(c.id, catName(c.id), f.cat))).join('')}</select></label>
           <label class="mini">Payment method<select class="inline-input" name="method">${opt('', 'Any', f.method)}${Object.entries(METHODS).map(([k, l]) => opt(k, l, f.method)).join('')}</select></label>
           <label class="mini">From date<input class="inline-input" type="date" name="from" value="${esc(f.from || '')}"></label>
           <label class="mini">To date<input class="inline-input" type="date" name="to" value="${esc(f.to || '')}"></label>
@@ -681,7 +726,92 @@ const planViews = {
       <div class="section-head"><h2>All bills and recurring items</h2><button class="btn small" data-action="add-recurring">+ Add</button></div>
       ${listCard(ups.map(recurringRow), 'Add rent, EMIs, SIPs, subscriptions and other regular payments. Choose to be reminded, or have them added automatically.')}`;
   },
+  goals() {
+    const goals = [...state.goals].sort((a, b) => (a.by || '').localeCompare(b.by || ''));
+    return `
+      <div class="section-head"><h2>Savings goals</h2><button class="btn small" data-action="add-goal">+ Goal</button></div>
+      ${goals.length ? `<div class="goal-list">${goals.map(goalCard).join('')}</div>`
+        : `<div class="card"><div class="empty">Save towards something: a car, a holiday, an emergency fund, a child's education. See how much to put aside each month.<br><br><button class="btn primary" data-action="add-goal">Add a goal</button></div></div>`}`;
+  },
+  lending() {
+    const open = state.debts.filter(x => debtLeft(x) > 0.005).sort((a, b) => (a.due || '9999').localeCompare(b.due || '9999'));
+    const done = state.debts.filter(x => debtLeft(x) <= 0.005).sort((a, b) => b.date.localeCompare(a.date));
+    const owedToMe = sum(open.filter(x => x.direction === 'lent'), debtLeft), iOwe = sum(open.filter(x => x.direction === 'borrowed'), debtLeft);
+    return `
+      <div class="grid">${stat('Others owe you', money(owedToMe), 'income')}${stat('You owe', money(iOwe), 'spend')}</div>
+      <div class="section-head"><h2>Open</h2><button class="btn small" data-action="add-debt">+ Add</button></div>
+      ${listCard(open.map(debtRow), 'Keep track of money you lend to friends and family, or borrow from them.')}
+      ${done.length ? `<h2>Settled</h2>${listCard(done.slice(0, 30).map(debtRow), '')}` : ''}`;
+  },
 };
+
+// ---- goals ----
+const goalSaved = g => sum(g.saved || [], c => c.amount) + (g.investmentId ? (i => (i ? i.currentValue ?? investedTotal(i) : 0))(state.investments.find(i => i.id === g.investmentId)) : 0);
+function goalCard(g) {
+  const saved = goalSaved(g), pctDone = g.target ? Math.min(100, (saved / g.target) * 100) : 0;
+  const months = g.by ? Math.max(1, monthDiff(todayISO().slice(0, 7), g.by) + 1) : 0;
+  const need = Math.max(0, g.target - saved);
+  const plan = need <= 0 ? '<b class="income">Reached. Well done!</b>'
+    : g.by ? (monthDiff(todayISO().slice(0, 7), g.by) < 0 ? `<span class="neg">Target date passed</span> · ${money(need)} to go` : `Put aside <b>${money(need / months)}</b> a month to reach it by ${esc(monthLabel(g.by, { month: 'short', year: 'numeric' }))}`)
+    : `${money(need)} to go`;
+  return `<div class="card goal" data-action="edit-goal" data-id="${g.id}" style="--tone:${catColor(g.name)}">
+    <div class="goal-top">${avatar(g.name)}<div class="main"><div class="title">${esc(g.name)}</div><div class="meta">${money(saved)} of ${money(g.target)}</div></div><div class="goal-pct">${Math.round(pctDone)}%</div></div>
+    <div class="bar-track"><div class="bar-fill" style="width:${pctDone}%"></div></div>
+    <div class="goal-plan">${plan}</div>
+  </div>`;
+}
+
+// ---- money lent and borrowed ----
+const debtLeft = x => x.amount - sum(x.repaid || [], p => p.amount);
+function debtsDueSoon() {
+  const today = todayISO();
+  return state.debts.filter(x => x.due && debtLeft(x) > 0.005 && daysBetween(today, x.due) <= 3);
+}
+function debtRow(x) {
+  const left = debtLeft(x), today = todayISO();
+  const days = x.due ? daysBetween(today, x.due) : null;
+  const status = left <= 0.005 ? 'Settled' : x.due ? (days < 0 ? `<span class="neg">${-days} days overdue</span>` : `due ${fmtDate(x.due)}`) : '';
+  return `<div class="row" data-action="edit-debt" data-id="${x.id}">
+    ${avatar(x.person)}
+    <div class="main"><div class="title">${esc(x.person)}</div><div class="meta">${x.direction === 'lent' ? 'You lent' : 'You borrowed'} ${money(x.amount)} on ${fmtDate(x.date)}${status ? ' · ' + status : ''}</div></div>
+    <div class="amt ${left <= 0.005 ? '' : x.direction === 'lent' ? 'income' : 'spend'}">${money(left > 0.005 ? left : x.amount)}<div class="meta">${left > 0.005 ? (x.direction === 'lent' ? 'owes you' : 'you owe') : ''}</div></div>
+  </div>`;
+}
+
+// ---- insights ----
+// Short "heads up" lines for the Overview: budgets that are over, and categories
+// already above all of last month's spending.
+function insights() {
+  const out = [];
+  for (const s of budgetStatus(state.month).filter(s => s.pct > 100)) out.push(`<b>${esc(s.name)}</b> is ${money(s.spent - s.limit)} over budget this month.`);
+  if (state.month === todayISO().slice(0, 7) && Number(todayISO().slice(8)) < daysIn(state.month)) {
+    const now = byCategory(entriesIn(state.month, 'expense'), state, true), before = new Map(byCategory(entriesIn(shiftMonth(state.month, -1), 'expense'), state, true));
+    for (const [name, v] of now) {
+      const last = before.get(name);
+      if (last && v > last && v - last >= 200) out.push(`You've already spent more on <b>${esc(name)}</b> (${money(v)}) than in all of last month (${money(last)}).`);
+    }
+  }
+  return out.slice(0, 3);
+}
+
+// After saving a spending entry: warn about budgets crossing 80% or 100%,
+// or an amount far above what's usual for that category.
+function spendingAlert(e, before = 0) {
+  if (e.type !== 'expense') return '';
+  for (const s of budgetStatus(e.date.slice(0, 7))) {
+    if (s.b.categoryId !== 'all' && !inCat(e, s.b.categoryId)) continue;
+    const was = s.limit ? ((s.spent - e.amount + before) / s.limit) * 100 : 0;
+    if (s.pct > 100 && was <= 100) return `Heads up: ${s.name} is now ${money(s.spent - s.limit)} over budget.`;
+    if (s.pct >= 80 && was < 80) return `Heads up: ${s.name} has used ${Math.round(s.pct)}% of its budget.`;
+  }
+  const top = topCatId(e.categoryId);
+  const past = state.entries.filter(x => x.type === 'expense' && x.id !== e.id && topCatId(x.categoryId) === top && x.date <= e.date && daysBetween(x.date, e.date) <= 180).map(x => x.amount).sort((a, b) => a - b);
+  if (past.length >= 5) {
+    const usual = past[Math.floor(past.length / 2)];
+    if (e.amount >= 3 * usual && e.amount - usual >= 500) return `Heads up: that's about ${Math.round(e.amount / usual)} times your usual ${catName(top)} spend.`;
+  }
+  return '';
+}
 
 // The range picked for export, as months.
 function exportRange(kind) {
@@ -761,9 +891,9 @@ function searchResults() {
   const min = parseFloat(f.min), max = parseFloat(f.max);
   const active = q || ['type', 'cat', 'method', 'from', 'to', 'min', 'max'].some(k => f[k]);
   if (!active) return '<p class="muted small-note">Search all your records, in every month. Use the filters to narrow it down.</p>';
-  const list = state.entries.filter(e => (!f.type || e.type === f.type) && (!f.cat || e.categoryId === f.cat) && (!f.method || e.method === f.method)
+  const list = state.entries.filter(e => (!f.type || e.type === f.type) && (!f.cat || inCat(e, f.cat)) && (!f.method || e.method === f.method)
     && (!f.from || e.date >= f.from) && (!f.to || e.date <= f.to) && (!(min > 0) || e.amount >= min) && (!(max > 0) || e.amount <= max)
-    && (!q || [e.note, e.type === 'salary' ? 'salary' : catName(e.categoryId), METHODS[e.method], String(e.amount), e.date].join(' ').toLowerCase().includes(q)))
+    && (!q || [e.note, e.type === 'salary' ? 'salary' : catName(e.categoryId), METHODS[e.method], String(e.amount), e.date, ...(e.tags || []).map(t => '#' + t)].join(' ').toLowerCase().includes(q)))
     .sort(byDateDesc);
   const moneyIn = sum(list.filter(e => e.type !== 'expense'), e => e.amount), moneyOut = sum(list.filter(e => e.type === 'expense'), e => e.amount);
   return `<div class="grid">${stat('Found', list.length)}${stat('Money in', money(moneyIn), 'income')}${stat('Money out', money(moneyOut), 'spend')}</div>
@@ -841,7 +971,7 @@ function render() {
   }
   bioPrompted = false;
   document.querySelectorAll('.tabs button, .top-actions button').forEach(b => { if (b.dataset.tab === state.tab) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
-  const urgent = dueSoon().length;
+  const urgent = dueSoon().length + debtsDueSoon().length;
   $('.tabs [data-tab=plan] .tab-badge').textContent = urgent || '';
   $('#month').value = state.month;
   $('#month-text').textContent = monthLabel(state.month, { month: 'short', year: 'numeric' });
@@ -878,7 +1008,7 @@ const amountField = (value = '', label = 'Amount') =>
   `<label class="field">${label}<input name="amount" type="number" inputmode="decimal" step="0.01" min="0.01" required autofocus value="${value}"></label>`;
 
 const categoryOptions = (kind, selected) =>
-  catsOf(kind).map(c => `<option value="${c.id}" ${c.id === selected ? 'selected' : ''}>${esc(c.name)}</option>`).join('') + '<option value="__new">+ New category…</option>';
+  catsOf(kind).map(c => `<option value="${c.id}" ${c.id === selected ? 'selected' : ''}>${esc(catName(c.id))}</option>`).join('') + '<option value="__new">+ New category…</option>';
 
 function lastSalary() {
   return [...state.entries].filter(e => e.type === 'salary').sort(byDateDesc)[0];
@@ -899,6 +1029,8 @@ function entryDialog(entry) {
       <label class="field">Payment method<select name="method">${methodOptions(e.method ?? (e.type === 'salary' ? 'bank' : lastMethod()))}</select></label>
     </div>
     <label class="field">Note (optional)<input name="note" maxlength="120" value="${esc(e.note || '')}"></label>
+    <label class="field">Tags (optional)<input name="tags" maxlength="120" value="${esc((e.tags || []).map(t => '#' + t).join(' '))}" placeholder="#trip-goa #office"></label>
+    ${isEdit ? '' : '<label class="check"><input type="checkbox" name="template"> Also save as a quick-add button</label>'}
     ${actions(isEdit)}`,
   async (fd, action) => {
     if (action === 'delete') {
@@ -912,10 +1044,13 @@ function entryDialog(entry) {
       let categoryId = type === 'salary' ? null : fd.get('categoryId');
       if (categoryId === '__new') throw new Error('Pick or create a category');
       const method = fd.get('method');
-      await save('entries', { ...e, type, amount, categoryId, method, date: fd.get('date'), note: fd.get('note').trim() });
+      const tags = parseTags(fd.get('tags'));
+      const note = fd.get('note').trim();
+      const rec = await save('entries', { ...e, type, amount, categoryId, method, date: fd.get('date'), note, tags });
       if (method && type === 'expense') try { localStorage.setItem('lastMethod', method); } catch {}
+      if (fd.get('template')) await save('templates', { name: note || (type === 'salary' ? 'Salary' : catName(categoryId).split(' › ').pop()), type, amount, categoryId, method, note, tags });
       if (!fd.get('date').startsWith(state.month)) state.month = fd.get('date').slice(0, 7);
-      toast(isEdit ? 'Saved' : `${TYPE_LABEL[type]} added`);
+      toast(spendingAlert(rec, isEdit && e.type === 'expense' ? e.amount : 0) || (isEdit ? 'Saved' : `${TYPE_LABEL[type]} added`));
     }
     render();
   },
@@ -946,12 +1081,13 @@ function entryDialog(entry) {
 function budgetDialog(b) {
   const x = b || { categoryId: '' };
   const taken = new Set(state.budgets.filter(o => o.id !== x.id).map(o => o.categoryId));
-  const opts = [['all', 'All spending'], ...catsOf('expense').map(c => [c.id, c.name])].filter(([id]) => !taken.has(id));
+  const opts = [['all', 'All spending'], ...catsOf('expense').map(c => [c.id, catName(c.id)])].filter(([id]) => !taken.has(id));
   if (!opts.length) return toast('Every category already has a budget');
   openDialog(`
     <h3>${b ? 'Edit budget' : 'New monthly budget'}</h3>
     <label class="field">For<select name="categoryId">${opts.map(([id, n]) => `<option value="${id}" ${id === x.categoryId ? 'selected' : ''}>${esc(n)}</option>`).join('')}</select></label>
     ${amountField(x.amount ?? '', 'Monthly limit')}
+    <label class="setting"><div><b>Carry over what's left</b><div class="muted">Money not spent this month is added to next month's limit.</div></div><input type="checkbox" class="switch" name="rollover" ${x.rollover ? 'checked' : ''}></label>
     ${actions(!!b)}`,
   async (fd, action) => {
     if (action === 'delete') {
@@ -960,7 +1096,7 @@ function budgetDialog(b) {
     } else {
       const amount = parseFloat(fd.get('amount'));
       if (!(amount > 0)) throw new Error('Enter a limit above zero');
-      await save('budgets', { ...x, categoryId: fd.get('categoryId'), amount });
+      await save('budgets', { ...x, categoryId: fd.get('categoryId'), amount, rollover: fd.get('rollover') === 'on', since: x.since || state.month });
       toast('Budget saved');
     }
     render();
@@ -1050,6 +1186,107 @@ function pinDialog(mode) {
   });
 }
 
+function goalDialog(goal) {
+  const g = goal || { saved: [] };
+  const list = [...(g.saved || [])].sort(byDateDesc);
+  openDialog(`
+    <h3>${goal ? esc(goal.name) : 'New savings goal'}</h3>
+    <label class="field">Goal<input name="name" required maxlength="60" value="${esc(g.name || '')}" placeholder="e.g. New car, Emergency fund" ${goal ? '' : 'autofocus'}></label>
+    <div class="two">
+      <label class="field">Target amount<input name="target" type="number" inputmode="decimal" step="0.01" min="1" required value="${g.target ?? ''}"></label>
+      <label class="field">Reach it by<input name="by" type="month" value="${g.by || ''}"></label>
+    </div>
+    <label class="field">Count a holding towards it (optional)<select name="investmentId"><option value="">No</option>${state.investments.map(i => `<option value="${i.id}" ${i.id === g.investmentId ? 'selected' : ''}>${esc(i.name)}</option>`).join('')}</select></label>
+    ${goal ? `
+      <div class="section-head" style="margin:6px 0 0"><b>Money put aside</b><span class="muted">${money(goalSaved(g))} so far</span></div>
+      <div class="inline-form" style="margin-top:0">
+        <input class="inline-input" name="sAmount" type="number" inputmode="decimal" step="0.01" placeholder="Amount (minus to take out)">
+        <input class="inline-input" name="sDate" type="date" value="${todayISO()}">
+        <button class="btn" value="add-saving" formnovalidate>Add</button>
+      </div>
+      <div style="max-height:160px;overflow:auto">${list.map(c => `<div class="row static" style="padding:8px 4px"><div class="main meta">${fmtDate(c.date)}</div><div class="amt ${c.amount < 0 ? 'neg' : 'income'}">${money(c.amount)}</div><button class="btn small" value="rm:${c.id}" formnovalidate aria-label="Remove">×</button></div>`).join('') || '<div class="empty">Nothing added yet.</div>'}</div>`
+    : '<label class="field">Already saved (optional)<input name="initial" type="number" inputmode="decimal" step="0.01" min="0"></label>'}
+    <p class="muted hint" style="margin:0">Amounts here only track the goal. They don't change your monthly totals.</p>
+    ${actions(!!goal)}`,
+  async (fd, action) => {
+    const base = { ...g, name: fd.get('name').trim(), target: parseFloat(fd.get('target')), by: fd.get('by') || '', investmentId: fd.get('investmentId') || null };
+    if (action === 'delete') {
+      if (!confirm(`Delete the goal "${goal.name}"?`)) return false;
+      await drop('goals', goal.id);
+      toast('Goal deleted');
+    } else if (action === 'add-saving' || action.startsWith('rm:')) {
+      const amount = parseFloat(fd.get('sAmount'));
+      if (action === 'add-saving' && !amount) throw new Error('Enter an amount');
+      const saved = action === 'add-saving' ? [...(g.saved || []), { id: db.uid(), date: fd.get('sDate') || todayISO(), amount }] : g.saved.filter(c => c.id !== action.slice(3));
+      const rec = await save('goals', { ...base, saved });
+      render();
+      goalDialog(rec);
+      return false;
+    } else {
+      if (!base.name) throw new Error('Give the goal a name');
+      if (!(base.target > 0)) throw new Error('Enter a target above zero');
+      const initial = parseFloat(fd.get('initial'));
+      if (!goal && initial > 0) base.saved = [{ id: db.uid(), date: todayISO(), amount: initial }];
+      await save('goals', base);
+      toast(goal ? 'Saved' : 'Goal added');
+    }
+    render();
+  });
+}
+
+function debtDialog(debt) {
+  const x = debt || { direction: 'lent', date: todayISO(), repaid: [] };
+  const paid = [...(x.repaid || [])].sort(byDateDesc);
+  const left = debt ? debtLeft(debt) : 0;
+  openDialog(`
+    <h3>${debt ? `${esc(debt.person)}` : 'Money lent or borrowed'}</h3>
+    <div class="seg">${[['lent', 'I lent'], ['borrowed', 'I borrowed']].map(([v, l]) => `<label><input type="radio" name="direction" value="${v}" ${x.direction === v ? 'checked' : ''}>${l}</label>`).join('')}</div>
+    <label class="field">Person<input name="person" required maxlength="60" value="${esc(x.person || '')}" ${debt ? '' : 'autofocus'}></label>
+    <div class="two">
+      <label class="field">Amount<input name="amount" type="number" inputmode="decimal" step="0.01" min="0.01" required value="${x.amount ?? ''}"></label>
+      <label class="field">On<input name="date" type="date" required value="${x.date}"></label>
+    </div>
+    <label class="field">To be returned by (optional)<input name="due" type="date" value="${x.due || ''}"></label>
+    <label class="field">Note (optional)<input name="note" maxlength="120" value="${esc(x.note || '')}"></label>
+    ${debt ? `
+      <div class="section-head" style="margin:6px 0 0"><b>Paid back</b><span class="muted">${left > 0.005 ? `${money(left)} left` : 'Settled'}</span></div>
+      <div class="inline-form" style="margin-top:0">
+        <input class="inline-input" name="pAmount" type="number" inputmode="decimal" step="0.01" min="0.01" placeholder="Amount">
+        <input class="inline-input" name="pDate" type="date" value="${todayISO()}">
+        <button class="btn" value="repay" formnovalidate>Add</button>
+      </div>
+      ${left > 0.005 ? `<button class="btn" value="settle" formnovalidate>Mark fully paid back (${money(left)})</button>` : ''}
+      <div style="max-height:140px;overflow:auto">${paid.map(p => `<div class="row static" style="padding:8px 4px"><div class="main meta">${fmtDate(p.date)}</div><div class="amt">${money(p.amount)}</div><button class="btn small" value="rm:${p.id}" formnovalidate aria-label="Remove">×</button></div>`).join('')}</div>` : ''}
+    ${actions(!!debt)}`,
+  async (fd, action) => {
+    const base = { ...x, direction: fd.get('direction'), person: fd.get('person').trim(), amount: parseFloat(fd.get('amount')), date: fd.get('date'), due: fd.get('due') || '', note: fd.get('note').trim() };
+    if (action === 'delete') {
+      if (!confirm('Delete this record?')) return false;
+      await drop('debts', debt.id);
+      toast('Deleted');
+    } else if (action === 'repay' || action === 'settle' || action.startsWith('rm:')) {
+      let repaid = x.repaid || [];
+      if (action === 'repay') {
+        const amount = parseFloat(fd.get('pAmount'));
+        if (!(amount > 0)) throw new Error('Enter an amount above zero');
+        repaid = [...repaid, { id: db.uid(), date: fd.get('pDate') || todayISO(), amount }];
+      } else if (action === 'settle') repaid = [...repaid, { id: db.uid(), date: todayISO(), amount: left }];
+      else repaid = repaid.filter(p => p.id !== action.slice(3));
+      const rec = await save('debts', { ...base, repaid });
+      render();
+      if (action === 'settle') { toast(`Settled with ${rec.person}`); return; }
+      debtDialog(rec);
+      return false;
+    } else {
+      if (!base.person) throw new Error('Who is it with?');
+      if (!(base.amount > 0)) throw new Error('Enter an amount above zero');
+      await save('debts', base);
+      toast('Saved');
+    }
+    render();
+  });
+}
+
 function investmentDialog(inv) {
   const i = inv || { contributions: [] };
   const contribs = [...(i.contributions || [])].sort(byDateDesc);
@@ -1124,7 +1361,7 @@ document.addEventListener('click', async e => {
     case 'next-month': state.month = shiftMonth(state.month, 1); render(); break;
     case 'quick-add':
       if (state.tab === 'investments') investmentDialog();
-      else if (state.tab === 'plan') (state.planView === 'budgets' ? budgetDialog() : recurringDialog());
+      else if (state.tab === 'plan') ({ budgets: budgetDialog, bills: recurringDialog, goals: goalDialog, lending: debtDialog })[state.planView]();
       else entryDialog({ type: state.tab === 'income' ? 'income' : 'expense', date: defaultDate() });
       break;
     case 'add-salary': {
@@ -1161,6 +1398,19 @@ document.addEventListener('click', async e => {
       break;
     }
     case 'subview': state[el.dataset.group + 'View'] = id; render(); break;
+    case 'add-goal': goalDialog(); break;
+    case 'edit-goal': goalDialog(state.goals.find(x => x.id === id)); break;
+    case 'add-debt': debtDialog(); break;
+    case 'edit-debt': debtDialog(state.debts.find(x => x.id === id)); break;
+    case 'quick-template': {
+      const q = state.templates.find(x => x.id === id);
+      const rec = await save('entries', { type: q.type, amount: q.amount, categoryId: q.categoryId, method: q.method || '', note: q.note || '', tags: q.tags || [], date: todayISO() });
+      state.month = todayISO().slice(0, 7);
+      render();
+      toast(spendingAlert(rec) || `Added ${q.name} ${money(q.amount)}`, { label: 'Undo', async run() { await drop('entries', rec.id); render(); toast('Removed'); } });
+      break;
+    }
+    case 'delete-template': await drop('templates', id); render(); break;
     case 'add-budget': budgetDialog(); break;
     case 'edit-budget': budgetDialog(state.budgets.find(x => x.id === id)); break;
     case 'add-recurring': recurringDialog(); break;
@@ -1279,9 +1529,10 @@ document.addEventListener('submit', async e => {
   const form = e.target.closest('[data-form="add-category"]');
   if (!form) return;
   e.preventDefault();
-  const name = new FormData(form).get('name').trim();
+  const fd = new FormData(form);
+  const name = fd.get('name').trim();
   if (!name) return;
-  await save('categories', { kind: form.dataset.kind, name });
+  await save('categories', { kind: form.dataset.kind, name, ...(fd.get('parentId') ? { parentId: fd.get('parentId') } : {}) });
   render();
 });
 
@@ -1331,9 +1582,11 @@ window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); instal
 
 if (TABS.includes(location.hash.slice(1))) state.tab = location.hash.slice(1);
 lock.biometricAvailable().then(ok => { state.bioAvailable = ok; if (ok && state.tab === 'settings') render(); });
+const shortcut = new URLSearchParams(location.search).get('add');
 if (auth.current()) {
   await enterAccount();
   if (state.tab === 'family') loadFamily();
+  if (TYPE_LABEL[shortcut] && !lock.isLocked()) { history.replaceState(null, '', location.pathname + location.hash); entryDialog({ type: shortcut, date: todayISO() }); }
 } else {
   render();
 }
