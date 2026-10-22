@@ -1,25 +1,44 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Admins: a verified email in this list can read every member's data.
+    // Admins: a verified email in this list can read every member's data and set roles.
     // Keep the list in sync with ADMIN_EMAILS in config.js.
     function isAdmin() {
       return request.auth != null
         && request.auth.token.email_verified == true
         && request.auth.token.email in ['lakkireddysurender@gmail.com', 'lakki911@gmail.com'];
     }
+    // Role set by an admin in family/roles: 'member', 'viewer', 'coadmin' or 'removed'.
+    // People the admin hasn't added yet have no role.
+    function role() {
+      let roles = /databases/$(database)/documents/family/roles;
+      return request.auth != null && exists(roles) ? get(roles).data.members.get(request.auth.uid, '') : '';
+    }
+    function isCoAdmin() { return role() == 'coadmin'; }
+    function isMember() { return isAdmin() || role() in ['member', 'viewer', 'coadmin']; }
+    function canEditShared() { return isAdmin() || role() in ['member', 'coadmin']; }
     function isOwner(uid) {
-      return request.auth != null && request.auth.uid == uid;
+      return request.auth != null && request.auth.uid == uid && role() != 'removed';
     }
 
+    // Each person's own records (and receipts). Admins and co-admins may read them.
     match /users/{uid} {
-      allow read: if isOwner(uid) || isAdmin();
+      allow read: if isOwner(uid) || isAdmin() || isCoAdmin();
       allow write: if isOwner(uid);
 
-      match /data/{chunk} {
-        allow read: if isOwner(uid) || isAdmin();
+      match /{rest=**} {
+        allow read: if isOwner(uid) || isAdmin() || isCoAdmin();
         allow write: if isOwner(uid);
       }
+    }
+
+    // Shared family space: family budgets, goals, split expenses, and each
+    // member's monthly spending totals (spend-<uid>, written only by that member).
+    match /family/{doc} {
+      allow read: if isMember() || (doc == 'roles' && request.auth != null);
+      allow write: if (doc == 'roles' && isAdmin())
+        || (doc == 'spend-' + request.auth.uid && isMember())
+        || (doc != 'roles' && !doc.matches('spend-.*') && canEditShared());
     }
   }
 }

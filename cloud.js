@@ -21,7 +21,7 @@ async function request(path, options = {}) {
   };
   let res = await send(await auth.token());
   if (res.status === 401) res = await send(await auth.token({ force: true }));
-  if (res.status === 403) throw new Error('The family database refused access. Check the security rules in Firebase.');
+  if (res.status === 403) throw Object.assign(new Error('The family database refused access. Check the security rules in Firebase.'), { status: 403 });
   if (res.status === 404 && options.method !== 'PATCH') return null;
   if (!res.ok) throw new Error(`Sync failed (${res.status}). Try again later.`);
   return res.json();
@@ -131,4 +131,74 @@ export async function family() {
     for (const store of db.STORES) data[store] = data[store].filter(r => !r.deleted);
     return { uid, name: p.fields?.name?.stringValue || 'Unnamed', email: p.fields?.email?.stringValue || '', data };
   }));
+}
+
+// ---------- shared family space (family/{doc}) ----------
+// Needs the rules in firestore.rules. Documents hold JSON like the data chunks,
+// except family/roles, whose `members` map is read by the security rules.
+
+const jsonFields = value => ({ json: str(JSON.stringify(value)), updatedAt: { timestampValue: new Date().toISOString() } });
+const parseJson = (d, fallback) => { try { return JSON.parse(d?.fields?.json?.stringValue); } catch { return fallback; } };
+
+// { uid: role } as set by an admin.
+export async function roles() {
+  const d = await request('family/roles');
+  return Object.fromEntries(Object.entries(d?.fields?.members?.mapValue?.fields || {}).map(([k, v]) => [k, v.stringValue]));
+}
+
+export async function setRole(uid, role) {
+  const mask = encodeURIComponent(`members.\`${uid}\``);
+  await request(`family/roles?updateMask.fieldPaths=${mask}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ fields: { members: { mapValue: { fields: { [uid]: { stringValue: role } } } } } }),
+  });
+}
+
+export async function getShared(name) {
+  return parseJson(await request(`family/${name}`), null);
+}
+
+// Merge records into a shared list (newer `updatedAt` wins) and save it if anything changed.
+export async function mergeShared(name, records = []) {
+  const map = new Map(((await getShared(name)) || []).map(r => [r.id, r]));
+  let changed = false;
+  for (const r of records) {
+    const old = map.get(r.id);
+    if (!old || (r.updatedAt || '') > (old.updatedAt || '')) { map.set(r.id, r); changed = true; }
+  }
+  const out = [...map.values()];
+  if (changed) await request(`family/${name}`, { method: 'PATCH', body: JSON.stringify({ fields: jsonFields(out) }) });
+  return out;
+}
+
+// This member's name and monthly spending by category, for family budgets and splits.
+export async function publishTotals(totals) {
+  const me = auth.current();
+  await request(`family/spend-${me.uid}`, { method: 'PATCH', body: JSON.stringify({ fields: jsonFields({ uid: me.uid, name: me.name, email: me.email, ...totals }) }) });
+}
+
+// Everyone who has published totals: [{ uid, name, email, months }].
+export async function people() {
+  return (await list('family')).filter(d => docId(d).startsWith('spend-')).map(d => parseJson(d, null)).filter(Boolean);
+}
+
+// ---------- receipts and devices (under users/{uid}) ----------
+
+export async function putReceipt(entryId, dataUrl) {
+  const me = auth.current();
+  await request(`users/${me.uid}/receipts/${entryId}`, { method: 'PATCH', body: JSON.stringify({ fields: { image: str(dataUrl) } }) });
+}
+export async function getReceipt(entryId, uid = auth.current()?.uid) {
+  return (await request(`users/${uid}/receipts/${entryId}`))?.fields?.image?.stringValue || null;
+}
+export async function deleteReceipt(entryId) {
+  await request(`users/${auth.current().uid}/receipts/${entryId}`, { method: 'DELETE' }).catch(() => {});
+}
+
+// Records this device as recently used and returns the list of devices.
+export async function touchDevice(id, label) {
+  const path = `users/${auth.current().uid}/meta/devices`;
+  const list = [{ id, label, lastSeen: new Date().toISOString() }, ...(parseJson(await request(path), []) || []).filter(d => d.id !== id)].slice(0, 12);
+  await request(path, { method: 'PATCH', body: JSON.stringify({ fields: jsonFields(list) }) });
+  return list;
 }

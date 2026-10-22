@@ -4,6 +4,8 @@ import * as cloud from './cloud.js';
 import * as lock from './lock.js';
 import { toCSV, toXLSX, saveFile } from './exporter.js';
 import { xirr, emi, schedule, incomeTax } from './finance.js';
+import * as i18n from './i18n.js';
+import { ADMIN_EMAILS } from './config.js';
 
 const DEFAULT_CATEGORIES = {
   income: ['Freelance', 'Bonus', 'Interest', 'Rent', 'Gift', 'Other'],
@@ -35,6 +37,11 @@ const state = {
   settings: { id: 'prefs', currency: 'INR' },
   family: null,        // admin only: [{ uid, name, email, data }]
   familyError: '',
+  familyView: 'shared',
+  role: '',            // this person's family role, set by an admin
+  roles: {},           // admin only: everyone's role
+  shared: { budgets: [], goals: [], splits: [], people: [] },
+  sharedError: '',
   familyMember: null,  // uid of the member being viewed in the Family tab
   authMode: 'login',   // login | register | reset
   changingPassword: false,
@@ -67,11 +74,11 @@ function shiftMonth(month, delta) {
 }
 function monthLabel(month, opts = { month: 'long', year: 'numeric' }) {
   const [y, m] = month.split('-').map(Number);
-  return new Date(y, m - 1, 1).toLocaleDateString(undefined, opts);
+  return new Date(y, m - 1, 1).toLocaleDateString(i18n.locale(), opts);
 }
 function fmtDate(iso) {
   const [y, m, d] = iso.split('-').map(Number);
-  return new Date(y, m - 1, d).toLocaleDateString(undefined, { day: 'numeric', month: 'short', ...(String(y) === todayISO().slice(0, 4) ? {} : { year: 'numeric' }) });
+  return new Date(y, m - 1, d).toLocaleDateString(i18n.locale(), { day: 'numeric', month: 'short', ...(String(y) === todayISO().slice(0, 4) ? {} : { year: 'numeric' }) });
 }
 const daysIn = month => new Date(Number(month.slice(0, 4)), Number(month.slice(5)), 0).getDate();
 const toDate = iso => new Date(...iso.split('-').map((v, i) => Number(v) - (i === 1 ? 1 : 0)));
@@ -131,9 +138,27 @@ function toast(msg, action) {
   t.innerHTML = esc(msg) + (action ? ` <button class="toast-btn">${esc(action.label)}</button>` : '');
   if (action) t.querySelector('button').onclick = () => { t.classList.remove('show'); action.run(); };
   t.classList.toggle('actionable', !!action);
+  i18n.translate(t);
   t.classList.add('show');
   clearTimeout(toast.timer);
   toast.timer = setTimeout(() => t.classList.remove('show'), action ? 5000 : 2600);
+}
+
+// Shrinks a photo to a JPEG data URL small enough to store (under about 700 KB).
+async function compressImage(file) {
+  const img = await new Promise((resolve, reject) => {
+    const i = new Image();
+    i.onload = () => resolve(i);
+    i.onerror = () => reject(new Error('That file is not a photo'));
+    i.src = URL.createObjectURL(file);
+  });
+  const scale = Math.min(1, 1200 / Math.max(img.width, img.height));
+  const c = Object.assign(document.createElement('canvas'), { width: Math.round(img.width * scale), height: Math.round(img.height * scale) });
+  c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+  URL.revokeObjectURL(img.src);
+  let q = 0.7, url = c.toDataURL('image/jpeg', q);
+  while (url.length > 700_000 && q > 0.2) url = c.toDataURL('image/jpeg', (q -= 0.15));
+  return url;
 }
 
 const parseTags = s => [...new Set(String(s || '').split(/[\s,]+/).map(t => t.replace(/^#+/, '').toLowerCase()).filter(Boolean))].slice(0, 10);
@@ -198,6 +223,7 @@ async function runSync(interactive = false) {
   try {
     const changed = await cloud.syncNow();
     syncMessage = '';
+    if (inFamily()) cloud.publishTotals(myTotals()).catch(() => {});
     if (changed) { await load(); render(); } else showSyncStatus();
     if (interactive) toast('All synced');
   } catch (err) {
@@ -300,15 +326,18 @@ async function enterAccount() {
     }
     try { localStorage.setItem('legacy.migratedTo', me.uid); } catch {}
   }
-  Object.assign(state, { ...Object.fromEntries(LISTS.map(s => [s, []])), settings: { id: 'prefs', currency: 'INR' }, family: null, familyMember: null });
+  Object.assign(state, { ...Object.fromEntries(LISTS.map(s => [s, []])), settings: { id: 'prefs', currency: 'INR' }, family: null, familyMember: null,
+    role: '', roles: {}, shared: { budgets: [], goals: [], splits: [], people: [] }, sharedError: '', devices: null });
   await load();
-  if (!TABS.includes(state.tab) || (state.tab === 'family' && !auth.isAdmin())) state.tab = 'dashboard';
+  if (!TABS.includes(state.tab)) state.tab = 'dashboard';
   render();
   await runSync(false);
   let navRun = '';
   try { navRun = localStorage.getItem('nav.lastRun') || ''; } catch {}
   if (navRun !== todayISO() && state.investments.some(i => i.schemeCode && i.units > 0)) refreshNav(undefined, true);
   recordNetWorth();
+  loadShared();
+  noteDevice();
 }
 
 function signedOut() {
@@ -316,6 +345,168 @@ function signedOut() {
   state.authMode = 'login';
   state.changingPassword = false;
   render();
+}
+
+// ---------- idle sign-out and devices ----------
+
+const idleLimit = () => { try { return Number(localStorage.getItem('idleSignout') || 0); } catch { return 0; } };
+let activeWritten = 0;
+function markActive() {
+  if (Date.now() - activeWritten < 30_000) return;
+  activeWritten = Date.now();
+  try { localStorage.setItem('lastActive', String(activeWritten)); } catch {}
+}
+// Signs out if this device has been unused for longer than the chosen limit.
+// Unsynced changes stay in this person's local database and sync at the next sign-in.
+function idleExpired() {
+  const lim = idleLimit();
+  if (!lim || !auth.current()) return false;
+  let last = 0;
+  try { last = Number(localStorage.getItem('lastActive') || 0); } catch {}
+  return !!last && Date.now() - last > lim * 60_000;
+}
+function checkIdle() {
+  if (!idleExpired()) return;
+  auth.logout();
+  lock.clear();
+  state.family = null;
+  signedOut();
+  toast('Signed out because the app was not used for a while');
+}
+
+function deviceLabel() {
+  if (window.Capacitor?.isNativePlatform?.()) return 'Android app';
+  const ua = navigator.userAgent;
+  return /Android/.test(ua) ? 'Browser on Android' : /iPhone|iPad/.test(ua) ? 'Browser on iPhone or iPad' : /Windows/.test(ua) ? 'Browser on Windows' : /Mac/.test(ua) ? 'Browser on Mac' : 'Browser';
+}
+async function noteDevice() {
+  try {
+    state.deviceId = localStorage.getItem('deviceId');
+    if (!state.deviceId) localStorage.setItem('deviceId', (state.deviceId = db.uid()));
+    state.devices = await cloud.touchDevice(state.deviceId, deviceLabel());
+    if (state.tab === 'settings') render();
+  } catch {}
+}
+
+// ---------- shared family space ----------
+
+const ROLE = { member: 'Member', viewer: 'Viewer', coadmin: 'Co-admin', removed: 'Removed' };
+const RULES_MSG = 'Family sharing needs the updated security rules in Firebase. The admin can paste them from the user guide (Family sharing setup).';
+const inFamily = () => auth.isAdmin() || ['member', 'viewer', 'coadmin'].includes(state.role);
+const canEditShared = () => auth.isAdmin() || ['member', 'coadmin'].includes(state.role);
+const canSeeAll = () => auth.isAdmin() || state.role === 'coadmin';
+const live = list => (list || []).filter(r => !r.deleted);
+
+// Spending by main category for recent months, shared so family budgets can add it up.
+function myTotals() {
+  const months = {};
+  for (let i = 0; i < 3; i++) {
+    const m = shiftMonth(todayISO().slice(0, 7), -i);
+    const list = entriesIn(m, 'expense');
+    months[m] = { _all: sum(list, e => e.amount), ...Object.fromEntries(byCategory(list, state, true)) };
+  }
+  return { months, lastActive: new Date().toISOString() };
+}
+
+let sharedLoadedAt = 0;
+async function loadShared() {
+  if (!auth.current()) return;
+  sharedLoadedAt = Date.now();
+  try {
+    state.roles = await cloud.roles();
+    state.role = state.roles[auth.current().uid] || '';
+  } catch (err) {
+    if (err instanceof auth.SignedOut) return signedOut();
+    state.sharedError = err.status === 403 ? RULES_MSG : err.message;
+  }
+  if (inFamily()) {
+    try {
+      await cloud.publishTotals(myTotals());
+      const [budgets, goals, splits, people] = await Promise.all(['budgets', 'goals', 'splits'].map(n => cloud.getShared(n)).concat(cloud.people()));
+      state.shared = { budgets: budgets || [], goals: goals || [], splits: splits || [], people: people || [] };
+      state.sharedError = '';
+    } catch (err) {
+      state.sharedError = err.status === 403 ? RULES_MSG : err.message;
+    }
+  }
+  if (state.tab === 'family' && !inFamily()) state.tab = 'dashboard';
+  render();
+}
+
+async function saveShared(name, rec) {
+  const r = { ...rec, id: rec.id || db.uid(), updatedAt: new Date().toISOString(), deleted: false };
+  state.shared[name] = await cloud.mergeShared(name, [r]);
+  render();
+  return r;
+}
+async function dropShared(name, rec) {
+  state.shared[name] = await cloud.mergeShared(name, [{ ...rec, deleted: true, updatedAt: new Date().toISOString() }]);
+  render();
+}
+
+function familyBudgetStatus(b) {
+  const key = b.category === 'all' ? '_all' : b.category;
+  const parts = state.shared.people.map(p => [p.name, p.months?.[state.month]?.[key] || 0]).filter(x => x[1] > 0);
+  const spent = sum(parts, x => x[1]);
+  return { b, name: b.category === 'all' ? 'All family spending' : b.category, spent, parts, pct: b.amount ? (spent / b.amount) * 100 : 0 };
+}
+function familyBudgetBar({ b, name, spent, parts, pct }) {
+  const left = b.amount - spent;
+  return `<div class="budget ${pct > 100 ? 'over' : pct >= 80 ? 'near' : ''}" ${canEditShared() ? `data-action="edit-fbudget" data-id="${b.id}"` : ''}>
+    <div class="bar-top"><span><b>${esc(name)}</b></span><span>${money(spent)} <span class="muted">of ${money(b.amount)}</span></span></div>
+    <div class="bar-track"><div class="bar-fill" style="width:${Math.min(pct, 100)}%"></div></div>
+    <div class="budget-meta">${left >= 0 ? `${money(left)} left` : `${money(-left)} over budget`}${parts.length ? ' · ' + parts.map(([n, v]) => `${esc(n)} ${money(v)}`).join(', ') : ''}</div>
+  </div>`;
+}
+function familyGoalCard(g) {
+  const saved = sum(g.saved || [], c => c.amount), pctDone = g.target ? Math.min(100, (saved / g.target) * 100) : 0;
+  const byPerson = [...(g.saved || []).reduce((m, c) => m.set(c.name, (m.get(c.name) || 0) + c.amount), new Map())];
+  const months = g.by ? Math.max(1, monthDiff(todayISO().slice(0, 7), g.by) + 1) : 0, need = Math.max(0, g.target - saved);
+  return `<div class="card goal" data-action="edit-fgoal" data-id="${g.id}" style="--tone:${catColor(g.name)}">
+    <div class="goal-top">${avatar(g.name)}<div class="main"><div class="title">${esc(g.name)}</div><div class="meta">${money(saved)} of ${money(g.target)}</div></div><div class="goal-pct">${Math.round(pctDone)}%</div></div>
+    <div class="bar-track"><div class="bar-fill" style="width:${pctDone}%"></div></div>
+    <div class="goal-plan">${need <= 0 ? '<b class="income">Reached together!</b>' : g.by ? `Together, put aside <b>${money(need / months)}</b> a month to reach it by ${esc(monthLabel(g.by, { month: 'short', year: 'numeric' }))}` : `${money(need)} to go`}${byPerson.length ? `<br>${byPerson.map(([n, v]) => `${esc(n)} ${money(v)}`).join(' · ')}` : ''}</div>
+  </div>`;
+}
+
+// Net balance per person: positive means the others owe them.
+function splitBalances() {
+  const bal = {};
+  for (const s of live(state.shared.splits)) {
+    bal[s.paidBy] = (bal[s.paidBy] || 0) + s.amount;
+    for (const [uid, share] of Object.entries(s.shares || {})) bal[uid] = (bal[uid] || 0) - share;
+  }
+  return bal;
+}
+const personName = uid => state.shared.people.find(p => p.uid === uid)?.name || 'Someone';
+function splitRow(s) {
+  const n = Object.keys(s.shares || {}).length;
+  return `<div class="row" data-action="edit-split" data-id="${s.id}">
+    ${avatar(s.settle ? personName(s.paidBy) : s.desc)}
+    <div class="main"><div class="title">${s.settle ? `${esc(personName(s.paidBy))} paid ${esc(personName(Object.keys(s.shares)[0]))}` : esc(s.desc)}</div>
+      <div class="meta">${fmtDate(s.date)}${s.settle ? ' · settled up' : ` · paid by ${esc(personName(s.paidBy))} · split ${n} way${n === 1 ? '' : 's'}`}</div></div>
+    <div class="amt">${money(s.amount)}</div>
+  </div>`;
+}
+
+const ago = iso => {
+  const mins = Math.round((Date.now() - new Date(iso)) / 60000);
+  return mins < 60 ? `${Math.max(1, mins)} min ago` : mins < 1440 ? `${Math.round(mins / 60)} h ago` : `${Math.round(mins / 1440)} d ago`;
+};
+// Latest records added or changed by anyone in the family (admins and co-admins).
+function activity() {
+  return (state.family || []).flatMap(p => p.data.entries.map(e => ({ p, e }))).filter(x => x.e.updatedAt > '1971')
+    .sort((a, b) => b.e.updatedAt.localeCompare(a.e.updatedAt)).slice(0, 20)
+    .map(({ p, e }) => `<div class="row static">${avatar(p.name)}
+      <div class="main"><div class="title">${esc(p.name)} · ${esc(e.type === 'salary' ? 'Salary' : catName(e.categoryId, p.data))}</div><div class="meta">${TYPE_LABEL[e.type]} on ${fmtDate(e.date)} · ${ago(e.updatedAt)}</div></div>
+      <div class="amt ${e.type === 'expense' ? 'spend' : 'income'}">${e.type === 'expense' ? '−' : '+'}${money(e.amount)}</div></div>`);
+}
+function rolesCard() {
+  const admins = new Set(ADMIN_EMAILS.map(e => e.toLowerCase()));
+  return `<h2>Roles</h2>
+    <div class="card settings-list">${(state.family || []).map(p => `<div class="setting"><div><b>${esc(p.name)}</b><div class="muted">${esc(p.email)}</div></div>
+      ${admins.has(p.email.toLowerCase()) ? '<span class="badge">Admin</span>' : `<select class="inline-input role-select" data-uid="${p.uid}"><option value="">Not added yet</option>${Object.entries(ROLE).map(([k, l]) => `<option value="${k}" ${state.roles[p.uid] === k ? 'selected' : ''}>${l}</option>`).join('')}</select>`}</div>`).join('')}</div>
+    <p class="muted small-note">Members share family budgets, goals and split expenses. Viewers can see them but not change them. Co-admins can also see everyone's records. Removed people can't sync any more.</p>`;
 }
 
 async function loadFamily() {
@@ -347,7 +538,7 @@ function entryRow(e, d) {
   const title = e.type === 'salary' ? 'Salary' : catName(e.categoryId, d);
   return `<div class="row${d === state ? '' : ' static'}" ${d === state ? `data-action="edit-entry" data-id="${e.id}"` : ''}>
     ${avatar(title)}
-    <div class="main"><div class="title">${esc(title)}</div><div class="meta">${[fmtDate(e.date), METHODS[e.method], e.note && esc(e.note), (e.tags || []).map(t => '#' + esc(t)).join(' ')].filter(Boolean).join(' · ')}</div></div>
+    <div class="main"><div class="title">${esc(title)}</div><div class="meta">${[fmtDate(e.date), e.orig && `${esc(e.orig.currency)} ${e.orig.amount}`, METHODS[e.method], e.note && esc(e.note), (e.tags || []).map(t => '#' + esc(t)).join(' '), e.receipt && 'receipt'].filter(Boolean).join(' · ')}</div></div>
     <div class="amt ${cls}">${e.type === 'expense' ? '−' : '+'}${money(e.amount)}</div>
   </div>`;
 }
@@ -692,6 +883,10 @@ const views = {
         <div class="setting"><div><b>App lock</b><div class="muted">${lock.enabled() ? 'On. A PIN is needed to open the app on this device.' : 'Ask for a PIN when the app opens on this device.'}</div></div>
           <button class="btn small" data-action="${lock.enabled() ? 'pin-off' : 'pin-set'}">${lock.enabled() ? 'Turn off' : 'Set a PIN'}</button></div>
         ${lock.enabled() ? `<div class="setting"><div><b>Change PIN</b></div><button class="btn small" data-action="pin-change">Change</button></div>` : ''}
+        <div class="setting"><div><b>Sign out when idle</b><div class="muted">On this device, after no use for a while.</div></div>
+          <select class="inline-input" id="idle-select" style="width:auto">${[[0, 'Never'], [15, 'After 15 minutes'], [60, 'After 1 hour'], [1440, 'After 1 day']].map(([v, l]) => `<option value="${v}" ${idleLimit() === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+        ${state.devices?.length ? `<div class="setting"><div><b>Signed-in devices</b>${state.devices.map(d => `<div class="muted">${esc(d.label)}${d.id === state.deviceId ? ' (this one)' : ''} · last used ${ago(d.lastSeen)}</div>`).join('')}
+          <div class="muted hint" style="margin-top:4px">To sign out everywhere else, change your password.</div></div></div>` : ''}
         ${lock.enabled() && state.bioAvailable ? `<label class="setting"><div><b>Fingerprint or face unlock</b><div class="muted">Unlock without typing the PIN.</div></div><input type="checkbox" class="switch" id="bio-toggle" ${lock.biometricOn() ? 'checked' : ''}></label>` : ''}
       </div>
       <h2>Quick-add buttons</h2>
@@ -700,7 +895,11 @@ const views = {
         <p class="muted" style="margin:${state.templates.length ? '12px' : '0'} 0 0">${state.templates.length ? 'They appear on the Overview. One tap adds the entry for today.' : 'When you add an entry, tick "Also save as a quick-add button". It then appears on the Overview, and one tap adds it for today.'}</p>
       </div>
       <h2>Look</h2>
-      <div class="card"><div class="seg" role="radiogroup" aria-label="Look">${Object.entries(SKINS).map(([k, l]) => `<label><input type="radio" name="skin" value="${k}" ${document.documentElement.dataset.skin === k ? 'checked' : ''}>${l}</label>`).join('')}</div></div>
+      <div class="card settings-list">
+        <div class="seg" role="radiogroup" aria-label="Look" style="margin:10px 0">${Object.entries(SKINS).map(([k, l]) => `<label><input type="radio" name="skin" value="${k}" ${skinChoice() === k ? 'checked' : ''}>${l}</label>`).join('')}</div>
+        <p class="muted hint" style="margin:0 0 8px">Auto uses Vault when your phone or PC is in dark mode.</p>
+        <div class="setting"><div><b>Language</b></div><select class="inline-input" id="lang-select" style="width:auto">${Object.entries(i18n.LANGS).map(([k, l]) => `<option value="${k}" ${i18n.lang() === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+      </div>
       <h2>Currency</h2>
       <div class="card"><select class="inline-input" id="currency">${CURRENCIES.map(c => `<option ${c === state.settings.currency ? 'selected' : ''}>${c}</option>`).join('')}</select></div>
       ${catBlock('income', 'Income categories')}
@@ -746,6 +945,14 @@ const views = {
   },
 
   family() {
+    const tabs = { shared: 'Budgets & goals', splits: 'Split expenses', ...(canSeeAll() ? { members: 'Members' } : {}) };
+    if (!tabs[state.familyView]) state.familyView = 'shared';
+    return subnav('family', tabs) + familyViews[state.familyView]();
+  },
+};
+
+const familyViews = {
+  members() {
     if (state.familyError) return `<div class="card"><p class="notice" style="margin:0">${esc(state.familyError)}</p><div class="btn-row" style="margin-top:12px"><button class="btn" data-action="family-reload">Try again</button></div></div>`;
     if (!state.family) return `<div class="card"><div class="empty">Loading everyone's records…</div></div>`;
     const member = state.family.find(p => p.uid === state.familyMember);
@@ -773,9 +980,41 @@ const views = {
       </div>
       <div class="section-head"><h2>Members</h2><button class="btn small" data-action="family-reload">Refresh</button></div>
       ${listCard(people.map(({ p, t }) => personRow(p, t)), 'No one has signed up yet.')}
-      <p class="muted small-note">Tap a person to see their records. Only you can see this tab.</p>`;
+      <h2>Recent activity</h2>
+      ${listCard(activity(), 'Nothing recorded yet.')}
+      ${auth.isAdmin() ? rolesCard() : ''}
+      <p class="muted small-note">Tap a person to see their records. Only admins and co-admins can see this section.</p>`;
+  },
+  shared() {
+    if (state.sharedError) return `<div class="card"><p class="notice" style="margin:0">${esc(state.sharedError)}</p><div class="btn-row" style="margin-top:12px"><button class="btn" data-action="shared-reload">Try again</button></div></div>`;
+    const budgets = live(state.shared.budgets).map(familyBudgetStatus).sort((a, b) => b.pct - a.pct);
+    const goals = live(state.shared.goals);
+    return `
+      <div class="section-head"><h2>Family budgets for ${esc(monthLabel(state.month))}</h2>${canEditShared() ? '<button class="btn small" data-action="add-fbudget">+ Budget</button>' : ''}</div>
+      ${budgets.length ? `<div class="card budgets">${budgets.map(familyBudgetBar).join('')}</div>` : `<div class="card"><div class="empty">A family budget adds up everyone's spending in a category, for example Groceries for the whole house.</div></div>`}
+      <div class="section-head"><h2>Family goals</h2>${canEditShared() ? '<button class="btn small" data-action="add-fgoal">+ Goal</button>' : ''}</div>
+      ${goals.length ? `<div class="goal-list">${goals.map(familyGoalCard).join('')}</div>` : `<div class="card"><div class="empty">Save together, for a family holiday or a new home. Everyone can add what they put aside.</div></div>`}
+      <p class="muted small-note">Family budgets use each member's main categories, matched by name. Members who haven't opened the app since the last update don't count yet.</p>`;
+  },
+  splits() {
+    if (state.sharedError) return `<div class="card"><p class="notice" style="margin:0">${esc(state.sharedError)}</p></div>`;
+    const me = auth.current().uid;
+    const bal = splitBalances();
+    const splits = live(state.shared.splits).sort((a, b) => b.date.localeCompare(a.date) || (b.updatedAt || '').localeCompare(a.updatedAt || ''));
+    const rows = state.shared.people.map(p => {
+      const v = bal[p.uid] || 0;
+      return `<div class="row static">${avatar(p.name)}<div class="main"><div class="title">${esc(p.name)}${p.uid === me ? ' (you)' : ''}</div><div class="meta">${Math.abs(v) < 0.5 ? 'All square' : v > 0 ? `gets back ${money(v)}` : `owes ${money(-v)}`}</div></div>
+        ${p.uid === me && v < -0.5 && canEditShared() ? '<button class="btn small primary" data-action="settle-up">Settle up</button>' : ''}</div>`;
+    });
+    return `
+      <h2>Who owes whom</h2>
+      ${listCard(rows, 'No one yet.')}
+      <div class="section-head"><h2>Shared expenses</h2>${canEditShared() ? '<button class="btn small" data-action="add-split">+ Split</button>' : ''}</div>
+      ${listCard(splits.slice(0, 60).map(splitRow), 'Record a shared bill, like dinner out or a trip, and see who owes whom.')}`;
   },
 };
+
+
 
 const planViews = {
   budgets() {
@@ -1222,12 +1461,15 @@ function memberView(m) {
     ${listCard(holdings, 'No investments.')}`;
 }
 
-const SKINS = { fresh: 'Fresh', vault: 'Vault' };
+const SKINS = { fresh: 'Fresh', vault: 'Vault', auto: 'Auto' };
+const darkQuery = window.matchMedia?.('(prefers-color-scheme: dark)');
+darkQuery?.addEventListener?.('change', () => render());
+// 'auto' follows the device: Vault when it is in dark mode, Fresh otherwise.
+const skinChoice = () => { try { const s = localStorage.getItem('skin'); return SKINS[s] ? s : 'fresh'; } catch { return 'fresh'; } };
 function applySkin() {
   const preview = new URLSearchParams(location.search).get('skin');
-  let saved = null;
-  try { saved = localStorage.getItem('skin'); } catch {}
-  document.documentElement.dataset.skin = SKINS[preview] ? preview : (SKINS[saved] ? saved : 'fresh');
+  const choice = SKINS[preview] ? preview : skinChoice();
+  document.documentElement.dataset.skin = choice === 'auto' ? (darkQuery?.matches ? 'vault' : 'fresh') : choice;
   document.querySelector('meta[name=theme-color]')?.setAttribute('content', getComputedStyle(document.documentElement).getPropertyValue('--bar-color').trim() || '#0e9f6e');
 }
 
@@ -1241,9 +1483,10 @@ function render() {
   const signedIn = !!auth.current();
   const locked = signedIn && lock.isLocked();
   document.body.classList.toggle('signed-out', !signedIn || locked);
-  $('.tabs [data-tab=family]').hidden = !auth.isAdmin();
+  $('.tabs [data-tab=family]').hidden = !inFamily();
   if (!signedIn || locked) {
     $('#view').innerHTML = locked ? lockView() : authView();
+    i18n.translate($('#view'));
     $('#view [autofocus]')?.focus();
     if (locked && lock.biometricOn() && !bioPrompted) { bioPrompted = true; setTimeout(tryBiometric, 300); }
     return;
@@ -1257,6 +1500,7 @@ function render() {
   $('.month-picker').style.visibility = ['settings', 'search'].includes(state.tab) || (state.tab === 'reports' && state.reportView !== 'summary') ? 'hidden' : '';
   $('.fab').hidden = ['family', 'settings', 'reports', 'search'].includes(state.tab);
   $('#view').innerHTML = views[state.tab]();
+  i18n.translate(document.body);
 }
 
 // ---------- dialogs ----------
@@ -1264,6 +1508,7 @@ function render() {
 function openDialog(html, onSubmit, onReady) {
   const dlg = $('#dialog'), form = $('#dialog-form');
   form.innerHTML = html;
+  i18n.translate(form);
   form.onsubmit = async e => {
     e.preventDefault();
     const action = e.submitter?.value || 'save';
@@ -1301,7 +1546,10 @@ function entryDialog(entry) {
   openDialog(`
     <h3>${isEdit ? 'Edit entry' : 'Add entry'}</h3>
     <div class="seg">${Object.entries(TYPE_LABEL).map(([v, l]) => `<label><input type="radio" name="type" value="${v}" ${e.type === v ? 'checked' : ''}>${l}</label>`).join('')}</div>
-    ${amountField(e.amount ?? '')}
+    <div class="amount-row">${amountField(e.orig ? e.orig.amount : e.amount ?? '')}
+      <label class="field">Currency<select name="cur">${[...new Set([state.settings.currency, ...CURRENCIES])].map(c => `<option ${c === (e.orig?.currency || state.settings.currency) ? 'selected' : ''}>${c}</option>`).join('')}</select></label></div>
+    <label class="field" id="fx-field" hidden><span id="fx-label">Rate</span><input name="rate" type="number" inputmode="decimal" step="0.0001" min="0" value="${e.orig?.rate ?? ''}"></label>
+    <p class="muted hint" id="fx-hint" style="margin:0" hidden></p>
     <label class="field" id="cat-field">Category<select name="categoryId"></select></label>
     <div class="two">
       <label class="field">Date<input name="date" type="date" required value="${e.date}"></label>
@@ -1309,23 +1557,42 @@ function entryDialog(entry) {
     </div>
     <label class="field">Note (optional)<input name="note" maxlength="120" value="${esc(e.note || '')}"></label>
     <label class="field">Tags (optional)<input name="tags" maxlength="120" value="${esc((e.tags || []).map(t => '#' + t).join(' '))}" placeholder="#trip-goa #office"></label>
+    <label class="field">Receipt photo (optional)<input name="receipt" type="file" accept="image/*"></label>
+    ${e.receipt ? `<button type="button" class="btn small" data-action="view-receipt" data-id="${e.id}">View receipt</button>` : ''}
     ${isEdit ? '' : '<label class="check"><input type="checkbox" name="template"> Also save as a quick-add button</label>'}
     ${actions(isEdit)}`,
   async (fd, action) => {
     if (action === 'delete') {
       if (!confirm('Delete this entry?')) return false;
       await drop('entries', e.id);
+      if (e.receipt) cloud.deleteReceipt(e.id);
       toast('Entry deleted');
     } else {
       const type = fd.get('type');
-      const amount = parseFloat(fd.get('amount'));
-      if (!(amount > 0)) throw new Error('Enter an amount above zero');
+      const typed = parseFloat(fd.get('amount'));
+      if (!(typed > 0)) throw new Error('Enter an amount above zero');
+      // Another currency: keep what was typed, and store the amount converted at the given rate.
+      const cur = fd.get('cur'), rate = parseFloat(fd.get('rate'));
+      const foreign = cur !== state.settings.currency;
+      if (foreign && !(rate > 0)) throw new Error(`Enter the rate for ${cur}`);
+      const amount = foreign ? Math.round(typed * rate * 100) / 100 : typed;
+      const orig = foreign ? { currency: cur, amount: typed, rate } : null;
+      if (foreign) try { localStorage.setItem(`fx.${cur}.${state.settings.currency}`, rate); } catch {}
       let categoryId = type === 'salary' ? null : fd.get('categoryId');
       if (categoryId === '__new') throw new Error('Pick or create a category');
       const method = fd.get('method');
       const tags = parseTags(fd.get('tags'));
       const note = fd.get('note').trim();
-      const rec = await save('entries', { ...e, type, amount, categoryId, method, date: fd.get('date'), note, tags });
+      let rec = await save('entries', { ...e, type, amount, orig, categoryId, method, date: fd.get('date'), note, tags });
+      const photo = fd.get('receipt');
+      if (photo && photo.size) {
+        try {
+          await cloud.putReceipt(rec.id, await compressImage(photo));
+          rec = await save('entries', { ...rec, receipt: true });
+        } catch (err) {
+          toast(err.status === 403 ? 'Receipt not saved: the admin needs to update the security rules first.' : 'Receipt not saved. Check your internet and try again.');
+        }
+      }
       if (method && type === 'expense') try { localStorage.setItem('lastMethod', method); } catch {}
       if (fd.get('template')) await save('templates', { name: note || (type === 'salary' ? 'Salary' : catName(categoryId).split(' › ').pop()), type, amount, categoryId, method, note, tags });
       if (!fd.get('date').startsWith(state.month)) state.month = fd.get('date').slice(0, 7);
@@ -1341,6 +1608,29 @@ function entryDialog(entry) {
       select.innerHTML = categoryOptions(kindOf(type), e.categoryId);
     };
     form.querySelectorAll('input[name=type]').forEach(r => r.addEventListener('change', sync));
+    // Currency: show the rate box for anything other than the home currency.
+    const home = state.settings.currency, curSel = form.querySelector('select[name=cur]'), rateIn = form.querySelector('input[name=rate]');
+    const fxHint = () => {
+      const foreign = curSel.value !== home, a = parseFloat(form.querySelector('input[name=amount]').value), r = parseFloat(rateIn.value);
+      form.querySelector('#fx-field').hidden = !foreign;
+      form.querySelector('#fx-label').textContent = `Rate: 1 ${curSel.value} = ? ${home}`;
+      const hint = form.querySelector('#fx-hint');
+      hint.hidden = !(foreign && a > 0 && r > 0);
+      hint.textContent = `Saved as ${money(Math.round(a * r * 100) / 100)}`;
+    };
+    curSel.addEventListener('change', async () => {
+      if (curSel.value !== home) {
+        try { rateIn.value = localStorage.getItem(`fx.${curSel.value}.${home}`) || ''; } catch {}
+        fxHint();
+        try {
+          const d = await getJSON(`https://api.frankfurter.app/latest?from=${curSel.value}&to=${home}`);
+          if (d?.rates?.[home]) rateIn.value = d.rates[home];
+        } catch {}
+      }
+      fxHint();
+    });
+    form.querySelectorAll('input[name=amount], input[name=rate]').forEach(i => i.addEventListener('input', fxHint));
+    fxHint();
     // Salary usually arrives by bank transfer; other types keep the last method used.
     if (!isEdit) form.querySelectorAll('input[name=type]').forEach(r => r.addEventListener('change', () => {
       form.querySelector('select[name=method]').value = r.value === 'salary' ? 'bank' : lastMethod();
@@ -1680,6 +1970,110 @@ function policyDialog(pol) {
   });
 }
 
+function familyBudgetDialog(b) {
+  const x = b || {};
+  const names = ['all', ...catsOf('expense').filter(c => !parentOf(c.id)).map(c => c.name)];
+  openDialog(`
+    <h3>${b ? 'Edit family budget' : 'New family budget'}</h3>
+    <label class="field">For<select name="category">${names.map(n => `<option value="${esc(n)}" ${n === x.category ? 'selected' : ''}>${n === 'all' ? 'All family spending' : esc(n)}</option>`).join('')}</select></label>
+    ${amountField(x.amount ?? '', 'Monthly limit for the whole family')}
+    ${actions(!!b)}`,
+  async (fd, action) => {
+    if (action === 'delete') { await dropShared('budgets', b); toast('Family budget removed'); return; }
+    const amount = parseFloat(fd.get('amount'));
+    if (!(amount > 0)) throw new Error('Enter a limit above zero');
+    await saveShared('budgets', { ...x, category: fd.get('category'), amount });
+    toast('Family budget saved');
+  });
+}
+
+function familyGoalDialog(goal) {
+  const g = goal || { saved: [] };
+  const me = auth.current();
+  openDialog(`
+    <h3>${goal ? esc(goal.name) : 'New family goal'}</h3>
+    ${canEditShared() ? `
+      <label class="field">Goal<input name="name" required maxlength="60" value="${esc(g.name || '')}" ${goal ? '' : 'autofocus'}></label>
+      <div class="two">
+        <label class="field">Target amount<input name="target" type="number" inputmode="decimal" min="1" step="1" required value="${g.target ?? ''}"></label>
+        <label class="field">Reach it by<input name="by" type="month" value="${g.by || ''}"></label>
+      </div>` : ''}
+    ${goal && canEditShared() ? `
+      <div class="section-head" style="margin:6px 0 0"><b>Add what you put aside</b></div>
+      <div class="inline-form" style="margin-top:0"><input class="inline-input" name="sAmount" type="number" inputmode="decimal" step="1" placeholder="Amount"><button class="btn" value="add-saving" formnovalidate>Add</button></div>` : ''}
+    ${goal ? `<div style="max-height:180px;overflow:auto">${[...(g.saved || [])].sort(byDateDesc).map(c => `<div class="row static" style="padding:8px 4px"><div class="main meta">${esc(c.name)} · ${fmtDate(c.date)}</div><div class="amt income">${money(c.amount)}</div>${c.uid === me.uid ? `<button class="btn small" value="rm:${c.id}" formnovalidate aria-label="Remove">×</button>` : ''}</div>`).join('') || '<div class="empty">Nothing added yet.</div>'}</div>` : ''}
+    ${canEditShared() ? actions(!!goal) : '<div class="dialog-actions"><div class="right"><button class="btn" value="cancel" formnovalidate>Close</button></div></div>'}`,
+  async (fd, action) => {
+    if (action === 'delete') { if (!confirm(`Delete the family goal "${goal.name}"?`)) return false; await dropShared('goals', goal); toast('Goal deleted'); return; }
+    const base = { ...g, name: fd.get('name').trim(), target: parseFloat(fd.get('target')), by: fd.get('by') || '' };
+    if (action === 'add-saving' || action.startsWith('rm:')) {
+      const amount = parseFloat(fd.get('sAmount'));
+      if (action === 'add-saving' && !amount) throw new Error('Enter an amount');
+      const saved = action === 'add-saving' ? [...(g.saved || []), { id: db.uid(), date: todayISO(), amount, uid: me.uid, name: me.name }] : g.saved.filter(c => c.id !== action.slice(3));
+      const rec = await saveShared('goals', { ...base, saved });
+      familyGoalDialog(rec);
+      return false;
+    }
+    if (!base.name || !(base.target > 0)) throw new Error('Give the goal a name and a target');
+    await saveShared('goals', base);
+    toast(goal ? 'Saved' : 'Family goal added');
+  });
+}
+
+function splitDialog(split) {
+  const me = auth.current().uid;
+  const people = state.shared.people;
+  const s = split || { date: todayISO(), paidBy: me, shares: Object.fromEntries(people.map(p => [p.uid, 0])) };
+  if (split?.settle) {
+    openDialog(`<h3>Settle-up</h3><p>${esc(personName(s.paidBy))} paid ${esc(personName(Object.keys(s.shares)[0]))} ${money(s.amount)} on ${fmtDate(s.date)}.</p>
+      ${canEditShared() ? actions(true).replace('<button class="btn primary" value="save">Save</button>', '') : ''}`,
+    async (fd, action) => { if (action === 'delete') { await dropShared('splits', split); toast('Removed'); } });
+    return;
+  }
+  openDialog(`
+    <h3>${split ? 'Shared expense' : 'Split an expense'}</h3>
+    <label class="field">What for<input name="desc" required maxlength="60" value="${esc(s.desc || '')}" placeholder="e.g. Dinner out" ${split ? '' : 'autofocus'}></label>
+    <div class="two">
+      ${amountField(s.amount ?? '', 'Amount').replace(' autofocus', '')}
+      <label class="field">Date<input name="date" type="date" required value="${s.date}"></label>
+    </div>
+    <label class="field">Paid by<select name="paidBy">${people.map(p => `<option value="${p.uid}" ${p.uid === s.paidBy ? 'selected' : ''}>${esc(p.name)}${p.uid === me ? ' (you)' : ''}</option>`).join('')}</select></label>
+    <fieldset class="field split-who"><legend>Split equally between</legend>${people.map(p => `<label class="check"><input type="checkbox" name="who" value="${p.uid}" ${s.shares && p.uid in s.shares ? 'checked' : ''}> ${esc(p.name)}</label>`).join('')}</fieldset>
+    ${split ? '' : '<label class="check"><input type="checkbox" name="mine" checked> Add my share to my own spending</label>'}
+    ${canEditShared() ? actions(!!split) : ''}`,
+  async (fd, action) => {
+    if (action === 'delete') { if (!confirm('Delete this shared expense?')) return false; await dropShared('splits', split); toast('Deleted'); return; }
+    const amount = parseFloat(fd.get('amount'));
+    const who = fd.getAll('who');
+    if (!fd.get('desc').trim()) throw new Error('What was it for?');
+    if (!(amount > 0)) throw new Error('Enter an amount above zero');
+    if (!who.length) throw new Error('Pick who shares it');
+    const each = Math.round((amount / who.length) * 100) / 100;
+    const shares = Object.fromEntries(who.map((uid, i) => [uid, i === 0 ? Math.round((amount - each * (who.length - 1)) * 100) / 100 : each]));
+    await saveShared('splits', { ...s, desc: fd.get('desc').trim(), amount, date: fd.get('date'), paidBy: fd.get('paidBy'), shares });
+    if (!split && fd.get('mine') && shares[me]) await save('entries', { type: 'expense', amount: shares[me], categoryId: catsOf('expense')[0]?.id, method: lastMethod(), date: fd.get('date'), note: `${fd.get('desc').trim()} (my share)`, tags: ['shared'] });
+    toast(split ? 'Saved' : 'Split added');
+    render();
+  });
+}
+
+function settleDialog() {
+  const me = auth.current().uid, bal = splitBalances();
+  const owed = state.shared.people.filter(p => p.uid !== me && (bal[p.uid] || 0) > 0.5);
+  if (!owed.length) return toast('No one is waiting for money from you');
+  openDialog(`
+    <h3>Settle up</h3>
+    <label class="field">You paid<select name="to">${owed.map(p => `<option value="${p.uid}">${esc(p.name)} (gets back ${money(bal[p.uid])})</option>`).join('')}</select></label>
+    ${amountField(Math.round(Math.min(-bal[me], bal[owed[0].uid]) * 100) / 100, 'Amount')}
+    ${actions(false)}`,
+  async fd => {
+    const amount = parseFloat(fd.get('amount'));
+    if (!(amount > 0)) throw new Error('Enter an amount above zero');
+    await saveShared('splits', { settle: true, desc: 'Settle-up', amount, date: todayISO(), paidBy: me, shares: { [fd.get('to')]: amount } });
+    toast('Settled up');
+  });
+}
+
 function investmentDialog(inv) {
   const i = inv || { contributions: [] };
   const contribs = [...(i.contributions || [])].sort(byDateDesc);
@@ -1764,7 +2158,10 @@ document.addEventListener('click', async e => {
     if (tabBtn.dataset.plan) state.planView = tabBtn.dataset.plan;
     location.hash = state.tab;
     window.scrollTo(0, 0);
-    if (state.tab === 'family') { state.familyMember = null; if (!state.family) loadFamily(); }
+    if (state.tab === 'family') {
+      // Until the new rules are in place, admins still get the members view.
+      if (state.sharedError && canSeeAll() && state.familyView === 'shared') state.familyView = 'members';
+      state.familyMember = null; if (!state.family && canSeeAll()) loadFamily(); if (Date.now() - sharedLoadedAt > 60_000) loadShared(); }
     render();
     return;
   }
@@ -1891,6 +2288,23 @@ document.addEventListener('click', async e => {
       break;
     case 'family-member': state.familyMember = id || null; render(); window.scrollTo(0, 0); break;
     case 'family-reload': state.family = null; render(); loadFamily(); break;
+    case 'shared-reload': state.sharedError = ''; render(); loadShared(); break;
+    case 'add-fbudget': familyBudgetDialog(); break;
+    case 'edit-fbudget': familyBudgetDialog(live(state.shared.budgets).find(x => x.id === id)); break;
+    case 'add-fgoal': familyGoalDialog(); break;
+    case 'edit-fgoal': familyGoalDialog(live(state.shared.goals).find(x => x.id === id)); break;
+    case 'add-split': splitDialog(); break;
+    case 'edit-split': splitDialog(live(state.shared.splits).find(x => x.id === id)); break;
+    case 'settle-up': settleDialog(); break;
+    case 'view-receipt': {
+      toast('Opening the receipt…');
+      try {
+        const img = await cloud.getReceipt(id, el.dataset.uid || undefined);
+        if (!img?.startsWith('data:image/')) return toast('Receipt not found');
+        openDialog(`<h3>Receipt</h3><img class="receipt" src="${img}" alt="Receipt photo"><div class="dialog-actions"><div class="right"><button class="btn" value="cancel" formnovalidate>Close</button></div></div>`, async () => {});
+      } catch (err) { toast(err.message); }
+      break;
+    }
     case 'sign-out': {
       el.disabled = true;
       let synced = true;
@@ -1982,12 +2396,14 @@ document.addEventListener('input', e => {
   if (searchForm) {
     state.search = Object.fromEntries(new FormData(searchForm));
     $('#search-results').innerHTML = searchResults();
+    i18n.translate($('#search-results'));
   }
   const taxForm = e.target.closest('[data-form="tax"]');
   if (taxForm) {
     const fy = Number(taxForm.dataset.fy);
     state.taxInputs = { ...state.taxInputs, years: { ...state.taxInputs.years, [fy]: Object.fromEntries(new FormData(taxForm)) } };
     $('#tax-results').innerHTML = taxResultHtml(fy);
+    i18n.translate($('#tax-results'));
     clearTimeout(taxSaveTimer);
     taxSaveTimer = setTimeout(async () => { state.taxInputs = await db.put('settings', state.taxInputs); scheduleSync(); }, 800);
   }
@@ -2000,6 +2416,15 @@ document.addEventListener('input', e => {
 document.addEventListener('change', async e => {
   if (e.target.name === 'fy') { state.fy = e.target.value === 'fy'; state.reportYear = null; render(); }
   if (e.target.id === 'trend-cat') { state.trendCat = e.target.value; render(); }
+  if (e.target.id === 'idle-select') { try { localStorage.setItem('idleSignout', e.target.value); } catch {} markActive(); toast('Saved'); }
+  if (e.target.id === 'lang-select') { i18n.setLang(e.target.value); location.reload(); }
+  if (e.target.classList.contains('role-select')) {
+    try {
+      await cloud.setRole(e.target.dataset.uid, e.target.value || 'none');
+      state.roles[e.target.dataset.uid] = e.target.value;
+      toast('Role saved');
+    } catch (err) { toast(err.status === 403 ? RULES_MSG : err.message); }
+  }
   if (e.target.id === 'bio-toggle') lock.setBiometric(e.target.checked);
   if (e.target.id === 'month' && e.target.value) { state.month = e.target.value; render(); }
   if (e.target.name === 'skin') {
@@ -2031,6 +2456,10 @@ window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); instal
 if (TABS.includes(location.hash.slice(1))) state.tab = location.hash.slice(1);
 lock.biometricAvailable().then(ok => { state.bioAvailable = ok; if (ok && state.tab === 'settings') render(); });
 const shortcut = new URLSearchParams(location.search).get('add');
+checkIdle();
+markActive();
+['click', 'keydown', 'touchstart'].forEach(t => document.addEventListener(t, markActive, { passive: true }));
+setInterval(checkIdle, 60_000);
 if (auth.current()) {
   await enterAccount();
   if (state.tab === 'family') loadFamily();
@@ -2040,7 +2469,10 @@ if (auth.current()) {
 }
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') return lock.onHidden();
+  checkIdle();
+  if (!auth.current()) return;
   if (lock.onVisible()) render();
   runSync(false);
+  if (Date.now() - sharedLoadedAt > 5 * 60_000) loadShared();
 });
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('sw.js').catch(() => {});
