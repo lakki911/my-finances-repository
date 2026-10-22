@@ -1,6 +1,6 @@
 # My Finances
 
-Personal finance tracker for salary, other income, spending and investments. It runs on PC and Android, works offline, and syncs through your own Google Drive.
+Personal finance tracker for salary, other income, spending and investments. It runs on PC and Android, works offline, and gives each family member their own account, with family totals for the admin (Firebase).
 
 - **Open on PC:** https://lakki911.github.io/my-finances-repository/
 - **Android APK:** https://github.com/lakki911/my-finances-repository/releases/latest/download/my-finances.apk
