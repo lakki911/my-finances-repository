@@ -47,7 +47,7 @@
 ## Investments
 
 - Open a holding to record a contribution (for example a monthly SIP) or change its current value.
-- **Money you already have** (savings, cash set aside, an old FD): add it as a holding with **Amount invested now**. Use the type **Savings / cash** for spare cash. When you take money out, open the holding, enter the amount and tap **Withdraw**.
+- **Money you already have** (savings, cash set aside, an old FD): add it as a holding with **Amount invested now**. Use the type **Savings / cash** for spare cash. When you take money out, open the holding, enter the amount and tap **Withdraw**. Money you already had is kept out of the month's totals (so Left over doesn't drop); tap the small label under an amount to switch between **Kept out of month** and **Counted in month**.
 - **Mutual funds:** open the holding, tap **Mutual fund? Update its value from the daily NAV**, search for your fund, and enter the units you hold (from your fund statement). The value then updates once a day.
 - Mark tax-saving holdings as **80C** or **NPS** so the tax estimate picks them up.
 

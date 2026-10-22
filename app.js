@@ -111,7 +111,9 @@ function catsOf(kind) {
   return all.filter(c => !parentOf(c.id)).sort(byName).flatMap(p => [p, ...all.filter(c => c.parentId === p.id).sort(byName)]);
 }
 const entriesIn = (month, type, d = state) => d.entries.filter(e => e.date.startsWith(month) && (!type || e.type === type));
-const investedIn = (month, d = state) => sum(d.investments.flatMap(i => i.contributions || []).filter(c => c.date.startsWith(month)), c => c.amount);
+// Money marked `opening` (savings you already had, or taken out of them) changes the holding's total,
+// but not that month's investing or left-over figures.
+const investedIn = (month, d = state) => sum(d.investments.flatMap(i => i.contributions || []).filter(c => !c.opening && c.date.startsWith(month)), c => c.amount);
 const investedTotal = inv => sum(inv.contributions || [], c => c.amount);
 
 function monthTotals(month, d = state) {
@@ -861,7 +863,7 @@ const views = {
     const alloc = [...state.investments.reduce((m, i) => m.set(ASSET[assetClassOf(i)], (m.get(ASSET[assetClassOf(i)]) || 0) + (i.currentValue ?? investedTotal(i))), new Map())].filter(a => a[1] > 0).sort((a, b) => b[1] - a[1]);
     const allR = holdingXirr(state.investments);
     const linked = state.investments.some(i => i.schemeCode && i.units > 0);
-    const thisMonth = state.investments.flatMap(i => (i.contributions || []).filter(c => c.date.startsWith(state.month)).map(c => ({ ...c, inv: i })))
+    const thisMonth = state.investments.flatMap(i => (i.contributions || []).filter(c => !c.opening && c.date.startsWith(state.month)).map(c => ({ ...c, inv: i })))
       .sort(byDateDesc)
       .map(c => `<div class="row" data-action="edit-investment" data-id="${c.inv.id}">
         <div class="main"><div class="title">${esc(c.inv.name)}</div><div class="meta">${fmtDate(c.date)}</div></div>
@@ -1163,7 +1165,7 @@ function taxAuto(fy) {
   const from = `${fy}-04`, to = `${fy + 1}-03`;
   const inFY = d => d && d.slice(0, 7) >= from && d.slice(0, 7) <= to;
   const fyEntries = state.entries.filter(e => inFY(e.date));
-  const contrib = tag => sum(state.investments.filter(i => i.tax === tag).flatMap(i => (i.contributions || []).filter(c => c.amount > 0 && inFY(c.date))), c => c.amount);
+  const contrib = tag => sum(state.investments.filter(i => i.tax === tag).flatMap(i => (i.contributions || []).filter(c => c.amount > 0 && !c.opening && inFY(c.date))), c => c.amount);
   const premiums = kinds => sum(fyEntries.filter(e => e.policyId && kinds.includes(state.policies.find(p => p.id === e.policyId)?.kind)), e => e.amount);
   const homeRows = state.loans.filter(l => l.kind === 'home').flatMap(l => schedule(l).filter(r => r.month >= from && r.month <= to));
   return {
@@ -2108,7 +2110,8 @@ function investmentDialog(inv) {
       ${i.nav ? `<p class="muted hint" style="margin:6px 0 0">NAV ${money(i.nav)} on ${esc(fmtDate(i.navDate))}. Updated once a day when you open the app.</p>` : ''}
     </details>
     ${inv ? '' : `<label class="field">Amount invested now (optional)<input name="initial" type="number" inputmode="decimal" step="0.01" min="0"></label>
-    <label class="field">Date<input name="date" type="date" value="${defaultDate()}"></label>`}
+    <label class="field">Date<input name="date" type="date" value="${defaultDate()}"></label>
+    <label class="check"><input type="checkbox" name="opening" checked> I already had this money (keep it out of this month's totals)</label>`}
     <label class="field">Current value (optional)<input name="currentValue" type="number" inputmode="decimal" step="0.01" min="0" value="${i.currentValue ?? ''}" placeholder="Leave blank to use amount invested"></label>
     ${inv ? `
       <div class="section-head" style="margin:6px 0 0"><b>Money in and out</b><span class="muted">${money(investedTotal(i))} put in, after withdrawals</span></div>
@@ -2117,9 +2120,10 @@ function investmentDialog(inv) {
         <input class="inline-input" name="cDate" type="date" value="${defaultDate()}">
         <button class="btn" value="contribute" formnovalidate>Add</button>
         <button class="btn" value="withdraw" formnovalidate>Withdraw</button>
+        <label class="check"><input type="checkbox" name="cOpening"> Keep out of this month's totals (money you already had)</label>
       </div>
       <div style="max-height:180px;overflow:auto">${contribs.map(c => `<div class="row" style="padding:8px 4px;cursor:default">
-        <div class="main meta">${fmtDate(c.date)} ${c.date.slice(0, 4)}</div><div class="amt ${c.amount < 0 ? 'spend' : 'invest'}">${c.amount < 0 ? `Withdrawn ${money(-c.amount)}` : money(c.amount)}</div>
+        <div class="main meta">${fmtDate(c.date)} ${c.date.slice(0, 4)}<button class="link-btn ${c.opening ? 'on' : ''}" value="op:${c.id}" formnovalidate>${c.opening ? '✓ Kept out of month' : 'Counted in month'}</button></div><div class="amt ${c.amount < 0 ? 'spend' : 'invest'}">${c.amount < 0 ? `−${money(-c.amount)}` : `+${money(c.amount)}`}</div>
         <button class="btn small" value="rm:${c.id}" formnovalidate aria-label="Remove">×</button></div>`).join('') || '<div class="empty">No contributions yet.</div>'}</div>` : ''}
     <label class="field">Note (optional)<input name="note" maxlength="120" value="${esc(i.note || '')}"></label>
     ${actions(!!inv)}`,
@@ -2145,7 +2149,7 @@ function investmentDialog(inv) {
     } else if (action === 'contribute') {
       const amount = parseFloat(fd.get('cAmount'));
       if (!(amount > 0)) throw new Error('Enter an amount above zero');
-      const saved = await save('investments', { ...base, contributions: [...(i.contributions || []), { id: db.uid(), date: fd.get('cDate') || defaultDate(), amount }] });
+      const saved = await save('investments', { ...base, contributions: [...(i.contributions || []), { id: db.uid(), date: fd.get('cDate') || defaultDate(), amount, ...(fd.get('cOpening') ? { opening: true } : {}) }] });
       render();
       investmentDialog(saved); // reopen with the new contribution listed
       return false;
@@ -2156,8 +2160,13 @@ function investmentDialog(inv) {
       const have = base.currentValue ?? investedTotal(i);
       if (amount > have + 0.005 && !confirm(`That's more than the ${money(have)} this holding is worth. Withdraw anyway?`)) return false;
       const saved = await save('investments', { ...base, currentValue: base.currentValue == null ? null : Math.max(0, base.currentValue - amount),
-        contributions: [...(i.contributions || []), { id: db.uid(), date: fd.get('cDate') || defaultDate(), amount: -amount }] });
+        contributions: [...(i.contributions || []), { id: db.uid(), date: fd.get('cDate') || defaultDate(), amount: -amount, ...(fd.get('cOpening') ? { opening: true } : {}) }] });
       toast(saved.schemeCode ? `Withdrew ${money(amount)}. Also update Units held for the new value.` : `Withdrew ${money(amount)}`);
+      render();
+      investmentDialog(saved);
+      return false;
+    } else if (action.startsWith('op:')) {
+      const saved = await save('investments', { ...base, contributions: i.contributions.map(c => (c.id === action.slice(3) ? { ...c, opening: !c.opening } : c)) });
       render();
       investmentDialog(saved);
       return false;
@@ -2169,7 +2178,7 @@ function investmentDialog(inv) {
     } else {
       if (!base.name) throw new Error('Give the investment a name');
       const initial = parseFloat(fd.get('initial'));
-      if (!inv && initial > 0) base.contributions = [{ id: db.uid(), date: fd.get('date') || defaultDate(), amount: initial }];
+      if (!inv && initial > 0) base.contributions = [{ id: db.uid(), date: fd.get('date') || defaultDate(), amount: initial, ...(fd.get('opening') ? { opening: true } : {}) }];
       const rec = await save('investments', base);
       toast(inv ? 'Saved' : 'Investment added');
       if (rec.schemeCode && rec.units > 0 && (rec.schemeCode !== i.schemeCode || rec.units !== i.units || !rec.nav)) refreshNav([rec]);
