@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>My Finances</title>
   <meta name="description" content="Track salary, income, spending and investments. Works offline.">
-  <meta name="theme-color" content="#0f766e">
+  <meta name="theme-color" content="#f2f4f8">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icons/icon-192.png">
@@ -16,7 +16,7 @@
     <h1>My Finances</h1>
     <div class="month-picker">
       <button class="icon-btn" data-action="prev-month" aria-label="Previous month">‹</button>
-      <input type="month" id="month" aria-label="Month">
+      <label class="month-label" data-action="pick-month"><span id="month-text"></span><input type="month" id="month" aria-label="Month"></label>
       <button class="icon-btn" data-action="next-month" aria-label="Next month">›</button>
     </div>
   </header>

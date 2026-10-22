@@ -152,10 +152,19 @@ function scheduleSync() {
 
 // ---------- views ----------
 
+// Stable color per category name, picked from the theme's category palette.
+function catColor(name) {
+  let h = 0;
+  for (const ch of name) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return `var(--c${h % 8})`;
+}
+const avatar = name => `<span class="avatar" style="--tone:${catColor(name)}" aria-hidden="true">${esc([...name.trim()][0] || '?').toUpperCase()}</span>`;
+
 function entryRow(e) {
   const cls = e.type === 'expense' ? 'spend' : 'income';
   const title = e.type === 'salary' ? 'Salary' : catName(e.categoryId);
   return `<div class="row" data-action="edit-entry" data-id="${e.id}">
+    ${avatar(title)}
     <div class="main"><div class="title">${esc(title)}</div><div class="meta">${fmtDate(e.date)}${e.note ? ' · ' + esc(e.note) : ''}</div></div>
     <div class="amt ${cls}">${e.type === 'expense' ? '−' : '+'}${money(e.amount)}</div>
   </div>`;
@@ -167,10 +176,28 @@ function bars(pairs, cls = '') {
   if (!pairs.length) return '<div class="empty">Nothing yet this month.</div>';
   const max = pairs[0][1] || 1;
   const total = sum(pairs, p => p[1]);
-  return `<div class="bars">${pairs.map(([name, v]) => `<div class="bar-row">
-    <div class="bar-top"><span>${esc(name)}</span><span><b>${money(v)}</b> <span class="muted">${Math.round((v / total) * 100)}%</span></span></div>
+  return `<div class="bars">${pairs.map(([name, v]) => `<div class="bar-row" style="--tone:${catColor(name)}">
+    <div class="bar-top"><span><i class="dot"></i>${esc(name)}</span><span><b>${money(v)}</b> <span class="muted">${Math.round((v / total) * 100)}%</span></span></div>
     <div class="bar-track"><div class="bar-fill ${cls}" style="width:${(v / max) * 100}%"></div></div>
   </div>`).join('')}</div>`;
+}
+
+function donut(pairs) {
+  const total = sum(pairs, p => p[1]);
+  const R = 52, C = 2 * Math.PI * R;
+  let offset = 0;
+  const arcs = pairs.map(([name, v]) => {
+    const len = (v / total) * C;
+    const arc = `<circle r="${R}" cx="70" cy="70" fill="none" stroke="${catColor(name)}" stroke-width="18" stroke-dasharray="${Math.max(len - 2, 0.1)} ${C}" stroke-dashoffset="${-offset}"><title>${esc(name)} ${money(v)}</title></circle>`;
+    offset += len;
+    return arc;
+  }).join('');
+  return `<svg class="donut" viewBox="0 0 140 140" role="img" aria-label="Spending by category">
+    <circle r="${R}" cx="70" cy="70" fill="none" stroke="var(--surface-2)" stroke-width="18"/>
+    <g transform="rotate(-90 70 70)">${arcs}</g>
+    <text x="70" y="66" text-anchor="middle" class="donut-label">Spent</text>
+    <text x="70" y="86" text-anchor="middle" class="donut-value">${money(total)}</text>
+  </svg>`;
 }
 
 function trendChart() {
@@ -221,18 +248,29 @@ const views = {
     const t = monthTotals(state.month);
     const rate = t.income ? (t.saved / t.income) * 100 : NaN;
     const p = portfolio();
+    const spendCats = byCategory(entriesIn(state.month, 'expense'));
     return `
-      <div class="grid">
+      <section class="hero">
+        <div class="hero-label">Left over in ${esc(monthLabel(state.month, { month: 'long' }))}</div>
+        <div class="hero-value">${money(t.saved)}</div>
+        <div class="hero-sub">${isFinite(rate) ? `You kept <b>${rate.toFixed(0)}%</b> of what you earned` : 'Add your salary to get started'}</div>
+        <div class="hero-meter" aria-hidden="true">
+          <span style="flex:${t.spent || 0};background:var(--hero-spend)"></span>
+          <span style="flex:${t.invested || 0};background:var(--hero-invest)"></span>
+          <span style="flex:${Math.max(t.saved, 0)};background:var(--hero-save)"></span>
+        </div>
+        <div class="hero-legend"><span><i style="background:var(--hero-spend)"></i>Spent</span><span><i style="background:var(--hero-invest)"></i>Invested</span><span><i style="background:var(--hero-save)"></i>Kept</span></div>
+      </section>
+      <div class="grid quad">
         ${stat('Salary', money(t.salary), 'income')}
         ${stat('Other income', money(t.other), 'income')}
         ${stat('Spending', money(t.spent), 'spend')}
         ${stat('Invested', money(t.invested), 'invest')}
-        ${stat('Left over', money(t.saved), t.saved < 0 ? 'neg' : '', isFinite(rate) ? `${rate.toFixed(0)}% of income` : '')}
       </div>
+      <h2>Where the money went</h2>
+      <div class="card">${spendCats.length ? `<div class="donut-wrap">${donut(spendCats)}${bars(spendCats)}</div>` : bars(spendCats)}</div>
       <h2>Last 6 months</h2>
       <div class="card">${trendChart()}</div>
-      <h2>Where the money went in ${esc(monthLabel(state.month))}</h2>
-      <div class="card">${bars(byCategory(entriesIn(state.month, 'expense')))}</div>
       <h2>Portfolio</h2>
       <div class="grid">
         ${stat('Total invested', money(p.invested), 'invest')}
@@ -283,6 +321,7 @@ const views = {
     const rows = [...state.investments].sort((a, b) => a.name.localeCompare(b.name)).map(i => {
       const inv = investedTotal(i), cur = i.currentValue ?? inv, g = inv ? ((cur - inv) / inv) * 100 : NaN;
       return `<div class="row" data-action="edit-investment" data-id="${i.id}">
+        ${avatar(i.name)}
         <div class="main"><div class="title">${esc(i.name)}</div><div class="meta">${esc(catName(i.categoryId))} · invested ${money(inv)}</div></div>
         <div class="amt">${money(cur)}<div class="meta ${cur < inv ? 'neg' : 'income'}">${pct(g)}</div></div>
       </div>`;
@@ -336,9 +375,18 @@ const views = {
   },
 };
 
+const SKINS = { fresh: 'Fresh', vault: 'Vault' };
+function applySkin() {
+  const preview = new URLSearchParams(location.search).get('skin');
+  document.documentElement.dataset.skin = SKINS[preview] ? preview : (SKINS[state.settings.skin] ? state.settings.skin : 'fresh');
+  document.querySelector('meta[name=theme-color]')?.setAttribute('content', getComputedStyle(document.documentElement).getPropertyValue('--bar-color').trim() || '#0e9f6e');
+}
+
 function render() {
+  applySkin();
   document.querySelectorAll('.tabs button').forEach(b => { if (b.dataset.tab === state.tab) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
   $('#month').value = state.month;
+  $('#month-text').textContent = monthLabel(state.month, { month: 'short', year: 'numeric' });
   $('.month-picker').style.visibility = state.tab === 'settings' ? 'hidden' : '';
   $('#view').innerHTML = views[state.tab]();
 }
@@ -488,6 +536,7 @@ document.addEventListener('click', async e => {
   if (!el) return;
   const id = el.dataset.id;
   switch (el.dataset.action) {
+    case 'pick-month': try { $('#month').showPicker(); } catch {} break;
     case 'prev-month': state.month = shiftMonth(state.month, -1); render(); break;
     case 'next-month': state.month = shiftMonth(state.month, 1); render(); break;
     case 'quick-add':
