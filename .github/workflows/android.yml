@@ -37,7 +37,7 @@ jobs:
       - name: Copy web app into www
         run: |
           rm -rf www && mkdir www
-          cp -r ../index.html ../styles.css ../*.js ../manifest.webmanifest ../icons www/
+          cp -r ../index.html ../styles.css ../*.js ../manifest.webmanifest ../icons ../fonts www/
           rm -f www/sw.js
           # Capacitor's JS runtime (registerPlugin etc.) must load before the app.
           cp node_modules/@capacitor/core/dist/capacitor.js www/

@@ -355,6 +355,8 @@ const views = {
         </form>
       </div>`;
     return `
+      <h2>Look</h2>
+      <div class="card"><div class="seg" role="radiogroup" aria-label="Look">${Object.entries(SKINS).map(([k, l]) => `<label><input type="radio" name="skin" value="${k}" ${document.documentElement.dataset.skin === k ? 'checked' : ''}>${l}</label>`).join('')}</div></div>
       <h2>Currency</h2>
       <div class="card"><select class="inline-input" id="currency">${CURRENCIES.map(c => `<option ${c === state.settings.currency ? 'selected' : ''}>${c}</option>`).join('')}</select></div>
       ${catBlock('income', 'Income categories')}
@@ -378,7 +380,9 @@ const views = {
 const SKINS = { fresh: 'Fresh', vault: 'Vault' };
 function applySkin() {
   const preview = new URLSearchParams(location.search).get('skin');
-  document.documentElement.dataset.skin = SKINS[preview] ? preview : (SKINS[state.settings.skin] ? state.settings.skin : 'fresh');
+  let saved = null;
+  try { saved = localStorage.getItem('skin'); } catch {}
+  document.documentElement.dataset.skin = SKINS[preview] ? preview : (SKINS[saved] ? saved : 'fresh');
   document.querySelector('meta[name=theme-color]')?.setAttribute('content', getComputedStyle(document.documentElement).getPropertyValue('--bar-color').trim() || '#0e9f6e');
 }
 
@@ -600,6 +604,10 @@ document.addEventListener('submit', async e => {
 
 document.addEventListener('change', async e => {
   if (e.target.id === 'month' && e.target.value) { state.month = e.target.value; render(); }
+  if (e.target.name === 'skin') {
+    try { localStorage.setItem('skin', e.target.value); } catch {}
+    render();
+  }
   if (e.target.id === 'currency') {
     state.settings = await db.put('settings', { ...state.settings, currency: e.target.value });
     scheduleSync();
