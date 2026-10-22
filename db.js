@@ -3,8 +3,9 @@
 // whichever copy has the newer `updatedAt` wins, and deletes travel as tombstones.
 
 export const LEGACY_DB = 'finance-app'; // the single-user database from before accounts
-const DB_VERSION = 1;
-export const STORES = ['entries', 'investments', 'categories', 'settings'];
+const DB_VERSION = 2;
+// v2 added the planning stores. Every store syncs as its own cloud chunk.
+export const STORES = ['entries', 'investments', 'categories', 'settings', 'budgets', 'recurring', 'goals', 'debts', 'loans', 'policies', 'templates'];
 
 let dbName = LEGACY_DB;
 let dbPromise;
@@ -74,6 +75,11 @@ export function put(store, record, { seed = false } = {}) {
   return run(store, 'readwrite', s => s.put(rec)).then(() => rec);
 }
 
+// One record by id, including a deleted one (its tombstone).
+export function get(store, id) {
+  return run(store, 'readonly', s => s.get(id));
+}
+
 // Soft delete: keep a tombstone so a future sync can propagate the delete.
 export async function remove(store, id) {
   const rec = await run(store, 'readonly', s => s.get(id));
@@ -118,7 +124,7 @@ export async function readLegacy() {
     req.onerror = () => reject(req.error);
   });
   const data = { app: 'finance-app', version: 1 };
-  for (const store of STORES) data[store] = await read(store);
+  for (const store of STORES) data[store] = db.objectStoreNames.contains(store) ? await read(store) : [];
   db.close();
   return data.entries.length || data.investments.length ? data : null;
 }

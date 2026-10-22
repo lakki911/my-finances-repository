@@ -55,7 +55,7 @@ function chunksOf(data) {
 }
 
 function fromChunks(docs) {
-  const data = { app: 'finance-app', version: 1, entries: [], investments: [], categories: [], settings: [] };
+  const data = { app: 'finance-app', version: 1, ...Object.fromEntries(db.STORES.map(s => [s, []])) };
   const raw = {};
   for (const doc of docs) {
     const chunk = docId(doc);
