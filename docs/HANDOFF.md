@@ -49,7 +49,7 @@ All JavaScript files must stay in the repo root: the APK build copies `../*.js`.
 | File | Purpose |
 |---|---|
 | `index.html` | App shell: top bar (month picker, search and settings buttons), `<main id="view">`, floating + button, tab bar, `<dialog>`, toast. |
-| `app.js` | All UI (~2,700 lines): state, views per tab and sub-view, dialogs, event delegation via `data-action`, recurring posting, budgets, insights, family sharing, idle sign-out. |
+| `app.js` | All UI (~2,500 lines): state, views per tab and sub-view, dialogs, event delegation via `data-action`, recurring posting, budgets, insights, family sharing, idle sign-out. |
 | `db.js` | IndexedDB layer (`DB_VERSION` 2): `all`, `get`, `put`, `remove` (soft delete), `exportAll`, `importAll` (merge), `wipe`, `readLegacy`. `STORES` lists every store. |
 | `auth.js` | Firebase Authentication REST: register (+ verification email), login, password reset, change password, token refresh, `isAdmin()`. Session in `localStorage['auth.session']`. |
 | `cloud.js` | Firestore REST: `syncNow` (own data), `family()` (admin/co-admin reads everyone), shared family space (`roles`, `setRole`, `getShared`, `mergeShared`, `publishTotals`, `people`), receipts, devices. |
