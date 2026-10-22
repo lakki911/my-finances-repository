@@ -256,6 +256,7 @@ body.signed-out { padding-left: 0; padding-bottom: 24px; }
 .auth-tag { color: var(--muted); margin: 0 0 8px; }
 .auth-card { display: flex; flex-direction: column; gap: 14px; padding: 22px; }
 .auth-card h2 { margin: 0; font-size: 18px; }
+.password-form { display: flex; flex-direction: column; gap: 12px; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border); }
 .auth-links { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
 .btn.big { padding: 12px 16px; font-size: 16px; }
 .btn:disabled { opacity: .6; cursor: progress; }

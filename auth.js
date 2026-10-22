@@ -76,6 +76,20 @@ export async function login(email, password) {
 
 export const resetPassword = email => call('accounts:sendOobCode', { requestType: 'PASSWORD_RESET', email });
 
+// Checks the current password by signing in again (Firebase also requires a
+// recent sign-in for this), then sets the new one. The session gets new tokens.
+export async function changePassword(currentPassword, newPassword) {
+  if (!session) throw new SignedOut();
+  let fresh;
+  try {
+    fresh = await call('accounts:signInWithPassword', { email: session.email, password: currentPassword, returnSecureToken: true });
+  } catch (err) {
+    throw err.message === ERRORS.INVALID_PASSWORD ? new Error('Your current password is wrong.') : err;
+  }
+  const r = await call('accounts:update', { idToken: fresh.idToken, password: newPassword, returnSecureToken: true });
+  start({ ...r, email: r.email || session.email }, session.name);
+}
+
 export async function resendVerification() {
   await call('accounts:sendOobCode', { requestType: 'VERIFY_EMAIL', idToken: await token() });
 }

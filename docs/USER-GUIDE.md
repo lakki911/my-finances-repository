@@ -26,7 +26,7 @@
 ## Settings
 
 - **Look:** pick **Fresh** (light) or **Vault** (dark). Each device remembers its own choice.
-- **Account:** shows who's signed in and when data last synced. **Sync now** syncs straight away. **Sign out** saves your changes to the cloud first.
+- **Account:** shows who's signed in and when data last synced. **Sync now** syncs straight away. **Change password** asks for your current password, then the new one twice. **Sign out** saves your changes to the cloud first.
 - **Categories:** add your own, or remove ones you don't use.
 - **Currency:** INR by default.
 - **Backup:** **Export backup** saves a file with all your data; **Import backup** merges one back in. Do an export now and then for safekeeping.

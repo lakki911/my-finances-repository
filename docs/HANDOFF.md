@@ -44,7 +44,7 @@ The owner is not a developer. Keep instructions to them simple and click-by-clic
 | `index.html` | App shell: top bar with month picker, `<main id="view">`, floating + button, bottom tab bar, `<dialog>` for forms, toast. |
 | `app.js` | All UI: state, views (`dashboard`, `income`, `spending`, `investments`, `settings`), dialogs, event delegation via `data-action` attributes, skins, and the sync triggers. |
 | `db.js` | IndexedDB layer: `all`, `put`, `remove` (soft delete), `exportAll`, `importAll` (merge), `wipe`. |
-| `auth.js` | Firebase Authentication REST: register (and send a verification email), login, password reset, ID-token refresh, `isAdmin()`. The session is kept in `localStorage` under `auth.session`. |
+| `auth.js` | Firebase Authentication REST: register (and send a verification email), login, password reset, change password (re-checks the current password, then `accounts:update`), ID-token refresh, `isAdmin()`. The session is kept in `localStorage` under `auth.session`. |
 | `cloud.js` | Firestore REST sync (`syncNow`), plus `family()` for admins. |
 | `config.js` | `FIREBASE` (`apiKey`, `projectId`; public by design) and `ADMIN_EMAILS` (UI only; the real check is in the rules). |
 | `firestore.rules` | Security rules. **The copy that is in force is the one pasted into Firebase console → Firestore → Rules**; keep the two the same. |
@@ -134,4 +134,5 @@ Lessons from the first builds:
 
 - **2026-10-21:** v1 built (PWA with IndexedDB). Hosted on GitHub Pages. Android APK pipeline added. Google Drive sync added and Google Cloud configured. Fixed APK signing and Capacitor runtime loading.
 - **2026-10-22:** Family accounts: Firebase email login, per-person data, admin Family view, migration of existing device data. Google Drive sync and the native Google sign-in plugin were removed.
+- **2026-10-22:** Change password in Settings → Account.
 - **2026-10-22:** Redesign: hero card, donut chart, category avatars, floating nav, bundled font, and the Fresh/Vault skins with a Look switch. This guide and the user guide were written.

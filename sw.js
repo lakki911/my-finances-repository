@@ -1,6 +1,6 @@
 // Offline support: serve the app shell from cache, refresh it in the background.
 // Bump VERSION whenever app files change so phones pick up the update.
-const VERSION = 'v5';
+const VERSION = 'v6';
 const CACHE = `finance-app-${VERSION}`;
 const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'db.js', 'auth.js', 'cloud.js', 'config.js', 'manifest.webmanifest', 'icons/icon.svg', 'fonts/manrope.woff2', 'icons/icon-192.png', 'icons/icon-512.png'];
 

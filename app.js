@@ -21,6 +21,7 @@ const state = {
   familyError: '',
   familyMember: null,  // uid of the member being viewed in the Family tab
   authMode: 'login',   // login | register | reset
+  changingPassword: false,
 };
 let installPrompt = null;
 
@@ -184,6 +185,7 @@ async function enterAccount() {
 function signedOut() {
   clearTimeout(syncTimer);
   state.authMode = 'login';
+  state.changingPassword = false;
   render();
 }
 
@@ -291,7 +293,13 @@ function accountCard() {
       </div>
       ${me.verified ? '' : `<p class="notice">Please verify your email address. We sent a link to ${esc(me.email)}. <button class="link" data-action="resend-verify">Send it again</button></p>`}
       <p class="muted" id="sync-status">${esc(syncStatusText())}</p>
-      <div class="btn-row"><button class="btn primary" data-action="sync-now">Sync now</button><button class="btn" data-action="sign-out">Sign out</button></div>
+      <div class="btn-row"><button class="btn primary" data-action="sync-now">Sync now</button><button class="btn" data-action="change-password">Change password</button><button class="btn" data-action="sign-out">Sign out</button></div>
+      ${state.changingPassword ? `<form class="password-form" data-form="password">
+        <label class="field">Current password<input name="current" type="password" autocomplete="current-password" required></label>
+        <label class="field">New password<input name="next" type="password" autocomplete="new-password" minlength="6" required><span class="hint">At least 6 characters</span></label>
+        <label class="field">Repeat new password<input name="repeat" type="password" autocomplete="new-password" minlength="6" required></label>
+        <div class="btn-row"><button class="btn primary">Save new password</button><button type="button" class="btn" data-action="change-password">Cancel</button></div>
+      </form>` : ''}
     </div>`;
 }
 
@@ -741,6 +749,11 @@ document.addEventListener('click', async e => {
     case 'sync-now': runSync(true); break;
     case 'install': installPrompt?.prompt(); installPrompt = null; render(); break;
     case 'auth-mode': state.authMode = id; render(); break;
+    case 'change-password':
+      state.changingPassword = !state.changingPassword;
+      render();
+      if (state.changingPassword) $('[data-form="password"] input')?.focus();
+      break;
     case 'resend-verify':
       try { await auth.resendVerification(); toast('Verification email sent'); } catch (err) { toast(err.message); }
       break;
@@ -783,6 +796,24 @@ document.addEventListener('submit', async e => {
     } catch (err) {
       toast(err.message);
     } finally {
+      btn.disabled = false;
+    }
+    return;
+  }
+  const pwForm = e.target.closest('[data-form="password"]');
+  if (pwForm) {
+    e.preventDefault();
+    const f = new FormData(pwForm);
+    if (f.get('next') !== f.get('repeat')) return toast('The new passwords don\'t match');
+    const btn = pwForm.querySelector('.btn.primary');
+    btn.disabled = true;
+    try {
+      await auth.changePassword(f.get('current'), f.get('next'));
+      state.changingPassword = false;
+      render();
+      toast('Password changed');
+    } catch (err) {
+      toast(err.message);
       btn.disabled = false;
     }
     return;
