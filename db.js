@@ -1,18 +1,41 @@
-// Local storage layer (IndexedDB).
-// Every record carries `id`, `updatedAt` and `deleted` so a cloud sync can be
-// added later: sync = push records changed since last sync, pull remote ones,
-// keep whichever has the newer `updatedAt`.
+// Local storage layer (IndexedDB), one database per signed-in person.
+// Every record carries `id`, `updatedAt` and `deleted` so sync can merge:
+// whichever copy has the newer `updatedAt` wins, and deletes travel as tombstones.
 
-const DB_NAME = 'finance-app';
+export const LEGACY_DB = 'finance-app'; // the single-user database from before accounts
 const DB_VERSION = 1;
 export const STORES = ['entries', 'investments', 'categories', 'settings'];
 
+let dbName = LEGACY_DB;
 let dbPromise;
+
+// Switch to the database of the person who just signed in.
+export function useDatabase(uid) {
+  const name = `${LEGACY_DB}-${uid}`;
+  if (name === dbName) return;
+  dbPromise?.then(db => db.close()).catch(() => {});
+  dbName = name;
+  dbPromise = null;
+}
+
+function openNamed(name) {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(name, DB_VERSION);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      for (const store of STORES) {
+        if (!db.objectStoreNames.contains(store)) db.createObjectStore(store, { keyPath: 'id' });
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
 
 function openDb() {
   if (!dbPromise) {
     dbPromise = new Promise((resolve, reject) => {
-      const req = indexedDB.open(DB_NAME, DB_VERSION);
+      const req = indexedDB.open(dbName, DB_VERSION);
       req.onupgradeneeded = () => {
         const db = req.result;
         for (const name of STORES) {
@@ -82,4 +105,20 @@ export async function importAll(data) {
 
 export async function wipe() {
   for (const name of STORES) await run(name, 'readwrite', s => s.clear());
+}
+
+// Everything in the pre-accounts database, or null if it holds no entries or investments.
+export async function readLegacy() {
+  const known = indexedDB.databases ? (await indexedDB.databases()).some(d => d.name === LEGACY_DB) : true;
+  if (!known) return null;
+  const db = await openNamed(LEGACY_DB);
+  const read = store => new Promise((resolve, reject) => {
+    const req = db.transaction(store, 'readonly').objectStore(store).getAll();
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+  const data = { app: 'finance-app', version: 1 };
+  for (const store of STORES) data[store] = await read(store);
+  db.close();
+  return data.entries.length || data.investments.length ? data : null;
 }

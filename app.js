@@ -1,5 +1,6 @@
 import * as db from './db.js';
-import * as sync from './sync.js';
+import * as auth from './auth.js';
+import * as cloud from './cloud.js';
 
 const DEFAULT_CATEGORIES = {
   income: ['Freelance', 'Bonus', 'Interest', 'Rent', 'Gift', 'Other'],
@@ -16,6 +17,10 @@ const state = {
   investments: [],
   categories: [],
   settings: { id: 'prefs', currency: 'INR' },
+  family: null,        // admin only: [{ uid, name, email, data }]
+  familyError: '',
+  familyMember: null,  // uid of the member being viewed in the Family tab
+  authMode: 'login',   // login | register | reset
 };
 let installPrompt = null;
 
@@ -51,24 +56,25 @@ function fmtDate(iso) {
 // Default date for a new entry: today if viewing this month, else the 1st of the viewed month.
 const defaultDate = () => (todayISO().startsWith(state.month) ? todayISO() : `${state.month}-01`);
 
-const catName = id => state.categories.find(c => c.id === id)?.name || 'Uncategorized';
+// Helpers take an optional dataset `d` so the Family tab can reuse them for other members.
+const catName = (id, d = state) => d.categories.find(c => c.id === id)?.name || 'Uncategorized';
 const catsOf = kind => state.categories.filter(c => c.kind === kind).sort((a, b) => a.name.localeCompare(b.name));
-const entriesIn = (month, type) => state.entries.filter(e => e.date.startsWith(month) && (!type || e.type === type));
-const investedIn = month => sum(state.investments.flatMap(i => i.contributions || []).filter(c => c.date.startsWith(month)), c => c.amount);
+const entriesIn = (month, type, d = state) => d.entries.filter(e => e.date.startsWith(month) && (!type || e.type === type));
+const investedIn = (month, d = state) => sum(d.investments.flatMap(i => i.contributions || []).filter(c => c.date.startsWith(month)), c => c.amount);
 const investedTotal = inv => sum(inv.contributions || [], c => c.amount);
 
-function monthTotals(month) {
-  const salary = sum(entriesIn(month, 'salary'), e => e.amount);
-  const other = sum(entriesIn(month, 'income'), e => e.amount);
-  const spent = sum(entriesIn(month, 'expense'), e => e.amount);
-  const invested = investedIn(month);
+function monthTotals(month, d = state) {
+  const salary = sum(entriesIn(month, 'salary', d), e => e.amount);
+  const other = sum(entriesIn(month, 'income', d), e => e.amount);
+  const spent = sum(entriesIn(month, 'expense', d), e => e.amount);
+  const invested = investedIn(month, d);
   const income = salary + other;
   return { salary, other, income, spent, invested, saved: income - spent - invested };
 }
 
-function byCategory(list) {
+function byCategory(list, d = state) {
   const map = new Map();
-  for (const e of list) map.set(catName(e.categoryId), (map.get(catName(e.categoryId)) || 0) + e.amount);
+  for (const e of list) map.set(catName(e.categoryId, d), (map.get(catName(e.categoryId, d)) || 0) + e.amount);
   return [...map.entries()].sort((a, b) => b[1] - a[1]);
 }
 
@@ -117,10 +123,10 @@ let syncTimer;
 
 function syncStatusText() {
   if (syncMessage) return syncMessage;
-  const last = sync.lastSynced();
+  const last = cloud.lastSynced();
   if (!last) return 'Not synced yet.';
   const mins = Math.round((Date.now() - new Date(last)) / 60000);
-  return `Last synced ${mins < 1 ? 'just now' : mins < 60 ? `${mins} min ago` : new Date(last).toLocaleString()}.`;
+  return `Synced ${mins < 1 ? 'just now' : mins < 60 ? `${mins} min ago` : new Date(last).toLocaleString()}.`;
 }
 function showSyncStatus() {
   const el = $('#sync-status');
@@ -128,16 +134,17 @@ function showSyncStatus() {
 }
 
 async function runSync(interactive = false) {
-  if (!interactive && !sync.isEnabled()) return;
+  if (!auth.current()) return;
   syncMessage = 'Syncing…';
   showSyncStatus();
   try {
-    const changed = await sync.syncNow({ interactive });
+    const changed = await cloud.syncNow();
     syncMessage = '';
-    if (changed) { await load(); render(); } else if (interactive) render(); else showSyncStatus();
-    if (interactive) toast('Synced with Google Drive');
+    if (changed) { await load(); render(); } else showSyncStatus();
+    if (interactive) toast('All synced');
   } catch (err) {
-    syncMessage = err instanceof sync.NeedsSignIn ? 'Signed out of Google. Tap Sync now to sign in again.' : (err.message || 'Sync failed. Try again later.');
+    if (err instanceof auth.SignedOut) return signedOut();
+    syncMessage = err.message || 'Sync failed. Try again later.';
     showSyncStatus();
     if (interactive) toast(syncMessage);
   }
@@ -145,9 +152,50 @@ async function runSync(interactive = false) {
 
 // Push local changes a few seconds after the last edit.
 function scheduleSync() {
-  if (!sync.isEnabled()) return;
+  if (!auth.current()) return;
   clearTimeout(syncTimer);
-  syncTimer = setTimeout(() => runSync(false), 3000);
+  syncTimer = setTimeout(() => runSync(false), 2000);
+}
+
+// ---------- accounts ----------
+
+// Open this person's local database. The first account to sign in on a device
+// that was used before accounts existed takes over that device's data.
+async function enterAccount() {
+  const me = auth.current();
+  db.useDatabase(me.uid);
+  let migrated = null;
+  try { migrated = localStorage.getItem('legacy.migratedTo'); } catch {}
+  if (!migrated) {
+    const legacy = await db.readLegacy().catch(() => null);
+    if (legacy) {
+      await db.importAll(legacy);
+      toast('Your existing data was moved into your account');
+    }
+    try { localStorage.setItem('legacy.migratedTo', me.uid); } catch {}
+  }
+  Object.assign(state, { entries: [], investments: [], categories: [], settings: { id: 'prefs', currency: 'INR' }, family: null, familyMember: null });
+  await load();
+  if (!['dashboard', 'income', 'spending', 'investments', 'settings', 'family'].includes(state.tab) || (state.tab === 'family' && !auth.isAdmin())) state.tab = 'dashboard';
+  render();
+  await runSync(false);
+}
+
+function signedOut() {
+  clearTimeout(syncTimer);
+  state.authMode = 'login';
+  render();
+}
+
+async function loadFamily() {
+  state.familyError = '';
+  try {
+    state.family = await cloud.family();
+  } catch (err) {
+    if (err instanceof auth.SignedOut) return signedOut();
+    state.familyError = auth.current()?.verified ? err.message : 'Verify your email address first (check your inbox), then sign out and sign in again.';
+  }
+  if (state.tab === 'family') render();
 }
 
 // ---------- views ----------
@@ -160,10 +208,13 @@ function catColor(name) {
 }
 const avatar = name => `<span class="avatar" style="--tone:${catColor(name)}" aria-hidden="true">${esc([...name.trim()][0] || '?').toUpperCase()}</span>`;
 
-function entryRow(e) {
+// With a dataset `d` other than the signed-in person's, the row is read-only.
+// (Also used directly as a .map() callback, where the 2nd argument is an index.)
+function entryRow(e, d) {
+  if (!d?.entries) d = state;
   const cls = e.type === 'expense' ? 'spend' : 'income';
-  const title = e.type === 'salary' ? 'Salary' : catName(e.categoryId);
-  return `<div class="row" data-action="edit-entry" data-id="${e.id}">
+  const title = e.type === 'salary' ? 'Salary' : catName(e.categoryId, d);
+  return `<div class="row${d === state ? '' : ' static'}" ${d === state ? `data-action="edit-entry" data-id="${e.id}"` : ''}>
     ${avatar(title)}
     <div class="main"><div class="title">${esc(title)}</div><div class="meta">${fmtDate(e.date)}${e.note ? ' · ' + esc(e.note) : ''}</div></div>
     <div class="amt ${cls}">${e.type === 'expense' ? '−' : '+'}${money(e.amount)}</div>
@@ -221,26 +272,68 @@ function trendChart() {
     <div class="legend"><span><i style="background:var(--income)"></i>Income</span><span><i style="background:var(--spend)"></i>Spending</span><span><i style="background:var(--invest)"></i>Invested</span></div></div>`;
 }
 
-function portfolio() {
-  const invested = sum(state.investments, investedTotal);
-  const current = sum(state.investments, i => i.currentValue ?? investedTotal(i));
+function portfolio(d = state) {
+  const invested = sum(d.investments, investedTotal);
+  const current = sum(d.investments, i => i.currentValue ?? investedTotal(i));
   return { invested, current, gain: current - invested, gainPct: invested ? ((current - invested) / invested) * 100 : NaN };
 }
 
 const stat = (label, value, cls = '', sub = '') =>
   `<div class="card stat"><div class="label">${label}</div><div class="value ${cls}">${value}</div>${sub ? `<div class="sub">${sub}</div>` : ''}</div>`;
 
-function syncCard() {
-  if (!sync.isConfigured()) return '';
-  return `<h2>Google Drive sync</h2>
-    <div class="card">
-      ${sync.isEnabled()
-        ? `<p style="margin-top:0" id="sync-status">${esc(syncStatusText())}</p>
-           <div class="btn-row"><button class="btn primary" data-action="sync-now">Sync now</button><button class="btn" data-action="sync-disconnect">Turn off sync</button></div>`
-        : `<p class="muted" style="margin-top:0">Keep this device in sync with your other devices through your own Google Drive. The data goes into a private app folder that only this app can read.</p>
-           <p class="muted" id="sync-status">${syncMessage ? esc(syncMessage) : ''}</p>
-           <button class="btn primary" data-action="sync-now">Connect Google Drive</button>`}
+function accountCard() {
+  const me = auth.current();
+  return `<h2>Account</h2>
+    <div class="card account">
+      <div class="row static">
+        ${avatar(me.name)}
+        <div class="main"><div class="title">${esc(me.name)} ${auth.isAdmin() ? '<span class="badge">Admin</span>' : ''}</div><div class="meta">${esc(me.email)}</div></div>
+      </div>
+      ${me.verified ? '' : `<p class="notice">Please verify your email address. We sent a link to ${esc(me.email)}. <button class="link" data-action="resend-verify">Send it again</button></p>`}
+      <p class="muted" id="sync-status">${esc(syncStatusText())}</p>
+      <div class="btn-row"><button class="btn primary" data-action="sync-now">Sync now</button><button class="btn" data-action="sign-out">Sign out</button></div>
     </div>`;
+}
+
+// One person's summary, used for the family total and for each member.
+function personRow(p, t) {
+  return `<div class="row" data-action="family-member" data-id="${p.uid}">
+    ${avatar(p.name)}
+    <div class="main"><div class="title">${esc(p.name)}</div>
+      <div class="meta">In <span class="income">${money(t.income)}</span> · Out <span class="spend">${money(t.spent)}</span> · Invested <span class="invest">${money(t.invested)}</span></div></div>
+    <div class="amt ${t.saved < 0 ? 'neg' : ''}">${money(t.saved)}<div class="meta">left over</div></div>
+  </div>`;
+}
+
+const AUTH_FORMS = {
+  login: () => `
+    <h2>Sign in</h2>
+    <label class="field">Email<input name="email" type="email" autocomplete="email" required autofocus></label>
+    <label class="field">Password<input name="password" type="password" autocomplete="current-password" required></label>
+    <button class="btn primary big">Sign in</button>
+    <div class="auth-links"><button type="button" class="link" data-action="auth-mode" data-id="register">Create an account</button><button type="button" class="link" data-action="auth-mode" data-id="reset">Forgot password?</button></div>`,
+  register: () => `
+    <h2>Create your account</h2>
+    <label class="field">Your name<input name="name" autocomplete="name" maxlength="40" required autofocus></label>
+    <label class="field">Email<input name="email" type="email" autocomplete="email" required></label>
+    <label class="field">Password<input name="password" type="password" autocomplete="new-password" minlength="6" required><span class="hint">At least 6 characters</span></label>
+    <button class="btn primary big">Create account</button>
+    <div class="auth-links"><button type="button" class="link" data-action="auth-mode" data-id="login">I already have an account</button></div>`,
+  reset: () => `
+    <h2>Reset your password</h2>
+    <p class="muted">Enter your email and we'll send you a link to choose a new password.</p>
+    <label class="field">Email<input name="email" type="email" autocomplete="email" required autofocus></label>
+    <button class="btn primary big">Send reset link</button>
+    <div class="auth-links"><button type="button" class="link" data-action="auth-mode" data-id="login">Back to sign in</button></div>`,
+};
+
+function authView() {
+  if (!auth.isConfigured()) return `<section class="auth"><div class="auth-brand">My Finances</div><p class="muted">Accounts aren't set up yet. Add the Firebase settings to config.js.</p></section>`;
+  return `<section class="auth">
+    <div class="auth-brand">My Finances</div>
+    <p class="auth-tag">Your family's salary, spending and investments, each person in their own space.</p>
+    <form class="card auth-card" data-form="auth">${AUTH_FORMS[state.authMode]()}</form>
+  </section>`;
 }
 
 const views = {
@@ -355,6 +448,7 @@ const views = {
         </form>
       </div>`;
     return `
+      ${accountCard()}
       <h2>Look</h2>
       <div class="card"><div class="seg" role="radiogroup" aria-label="Look">${Object.entries(SKINS).map(([k, l]) => `<label><input type="radio" name="skin" value="${k}" ${document.documentElement.dataset.skin === k ? 'checked' : ''}>${l}</label>`).join('')}</div></div>
       <h2>Currency</h2>
@@ -362,20 +456,77 @@ const views = {
       ${catBlock('income', 'Income categories')}
       ${catBlock('expense', 'Spending categories')}
       ${catBlock('investment', 'Investment types')}
-      ${syncCard()}
       <h2>Backup</h2>
       <div class="card">
-        <p class="muted" style="margin-top:0">${sync.isEnabled() ? 'Your data is also kept in your Google Drive.' : 'Your data is stored only on this device.'} Export a backup file now and then for safekeeping.</p>
+        <p class="muted" style="margin-top:0">Your data is saved in your account and on this device. You can also export a backup file for safekeeping.</p>
         <div class="btn-row">
           <button class="btn primary" data-action="export">Export backup</button>
           <label class="btn">Import backup<input type="file" id="import-file" accept="application/json,.json" hidden></label>
         </div>
       </div>
-      ${installPrompt ? `<h2>App</h2><div class="card"><button class="btn primary" data-action="install">Install on this device</button></div>` : ''}
-      <h2>Danger zone</h2>
-      <div class="card"><button class="btn danger" data-action="wipe">Delete all data on this device</button></div>`;
+      ${installPrompt ? `<h2>App</h2><div class="card"><button class="btn primary" data-action="install">Install on this device</button></div>` : ''}`;
+  },
+
+  family() {
+    if (state.familyError) return `<div class="card"><p class="notice" style="margin:0">${esc(state.familyError)}</p><div class="btn-row" style="margin-top:12px"><button class="btn" data-action="family-reload">Try again</button></div></div>`;
+    if (!state.family) return `<div class="card"><div class="empty">Loading everyone's records…</div></div>`;
+    const member = state.family.find(p => p.uid === state.familyMember);
+    if (member) return memberView(member);
+    const people = state.family.map(p => ({ p, t: monthTotals(state.month, p.data), port: portfolio(p.data) }));
+    const total = people.reduce((a, { t }) => ({ income: a.income + t.income, spent: a.spent + t.spent, invested: a.invested + t.invested, saved: a.saved + t.saved }), { income: 0, spent: 0, invested: 0, saved: 0 });
+    const port = people.reduce((a, { port }) => ({ invested: a.invested + port.invested, current: a.current + port.current }), { invested: 0, current: 0 });
+    return `
+      <section class="hero">
+        <div class="hero-label">Family left over in ${esc(monthLabel(state.month, { month: 'long' }))}</div>
+        <div class="hero-value">${money(total.saved)}</div>
+        <div class="hero-sub">${people.length} ${people.length === 1 ? 'person' : 'people'} · earned <b>${money(total.income)}</b></div>
+        <div class="hero-meter" aria-hidden="true">
+          <span style="flex:${total.spent || 0};background:var(--hero-spend)"></span>
+          <span style="flex:${total.invested || 0};background:var(--hero-invest)"></span>
+          <span style="flex:${Math.max(total.saved, 0)};background:var(--hero-save)"></span>
+        </div>
+        <div class="hero-legend"><span><i style="background:var(--hero-spend)"></i>Spent</span><span><i style="background:var(--hero-invest)"></i>Invested</span><span><i style="background:var(--hero-save)"></i>Kept</span></div>
+      </section>
+      <div class="grid quad">
+        ${stat('Family income', money(total.income), 'income')}
+        ${stat('Family spending', money(total.spent), 'spend')}
+        ${stat('Invested this month', money(total.invested), 'invest')}
+        ${stat('Portfolio value', money(port.current), '', `${money(port.invested)} invested`)}
+      </div>
+      <div class="section-head"><h2>Members</h2><button class="btn small" data-action="family-reload">Refresh</button></div>
+      ${listCard(people.map(({ p, t }) => personRow(p, t)), 'No one has signed up yet.')}
+      <p class="muted small-note">Tap a person to see their records. Only you can see this tab.</p>`;
   },
 };
+
+// Admin's read-only look at one member.
+function memberView(m) {
+  const d = m.data;
+  const t = monthTotals(state.month, d);
+  const list = entriesIn(state.month, null, d).sort(byDateDesc);
+  const p = portfolio(d);
+  const holdings = [...d.investments].sort((a, b) => a.name.localeCompare(b.name)).map(i => {
+    const inv = investedTotal(i), cur = i.currentValue ?? inv;
+    return `<div class="row static">${avatar(i.name)}<div class="main"><div class="title">${esc(i.name)}</div><div class="meta">${esc(catName(i.categoryId, d))} · invested ${money(inv)}</div></div><div class="amt">${money(cur)}</div></div>`;
+  });
+  return `
+    <button class="btn small back" data-action="family-member" data-id="">‹ All members</button>
+    <div class="person-head">${avatar(m.name)}<div><div class="title">${esc(m.name)}</div><div class="meta muted">${esc(m.email)}</div></div></div>
+    <div class="grid quad">
+      ${stat('Income', money(t.income), 'income')}
+      ${stat('Spending', money(t.spent), 'spend')}
+      ${stat('Invested', money(t.invested), 'invest')}
+      ${stat('Left over', money(t.saved), t.saved < 0 ? 'neg' : '')}
+    </div>
+    <h2>Where the money went</h2>
+    <div class="card">${bars(byCategory(entriesIn(state.month, 'expense', d), d))}</div>
+    <h2>Records in ${esc(monthLabel(state.month))}</h2>
+    ${listCard(list.map(e => entryRow(e, d)), 'Nothing recorded this month.')}
+    <h2>Investments</h2>
+    <div class="grid">${stat('Invested', money(p.invested), 'invest')}${stat('Current value', money(p.current))}</div>
+    <div style="height:10px"></div>
+    ${listCard(holdings, 'No investments.')}`;
+}
 
 const SKINS = { fresh: 'Fresh', vault: 'Vault' };
 function applySkin() {
@@ -388,10 +539,19 @@ function applySkin() {
 
 function render() {
   applySkin();
+  const signedIn = !!auth.current();
+  document.body.classList.toggle('signed-out', !signedIn);
+  $('.tabs [data-tab=family]').hidden = !auth.isAdmin();
+  if (!signedIn) {
+    $('#view').innerHTML = authView();
+    $('#view [autofocus]')?.focus();
+    return;
+  }
   document.querySelectorAll('.tabs button').forEach(b => { if (b.dataset.tab === state.tab) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
   $('#month').value = state.month;
   $('#month-text').textContent = monthLabel(state.month, { month: 'short', year: 'numeric' });
   $('.month-picker').style.visibility = state.tab === 'settings' ? 'hidden' : '';
+  $('.fab').hidden = state.tab === 'family' || state.tab === 'settings';
   $('#view').innerHTML = views[state.tab]();
 }
 
@@ -535,7 +695,13 @@ function investmentDialog(inv) {
 
 document.addEventListener('click', async e => {
   const tabBtn = e.target.closest('[data-tab]');
-  if (tabBtn) { state.tab = tabBtn.dataset.tab; location.hash = state.tab; render(); return; }
+  if (tabBtn) {
+    state.tab = tabBtn.dataset.tab;
+    location.hash = state.tab;
+    if (state.tab === 'family') { state.familyMember = null; if (!state.family) loadFamily(); }
+    render();
+    return;
+  }
   const el = e.target.closest('[data-action]');
   if (!el) return;
   const id = el.dataset.id;
@@ -573,26 +739,54 @@ document.addEventListener('click', async e => {
       break;
     }
     case 'sync-now': runSync(true); break;
-    case 'sync-disconnect':
-      if (!confirm('Turn off sync on this device? Your data stays on this device and in Google Drive.')) return;
-      await sync.disconnect();
-      render();
-      toast('Sync turned off');
-      break;
     case 'install': installPrompt?.prompt(); installPrompt = null; render(); break;
-    case 'wipe':
-      if (prompt(`This deletes everything on this device${sync.isEnabled() ? ' and turns off sync. Your Google Drive copy is kept' : ''}. Type DELETE to confirm.`) !== 'DELETE') return;
-      await sync.disconnect();
-      await db.wipe();
-      Object.assign(state, { entries: [], investments: [], categories: [] });
-      await load();
-      render();
-      toast('All data deleted');
+    case 'auth-mode': state.authMode = id; render(); break;
+    case 'resend-verify':
+      try { await auth.resendVerification(); toast('Verification email sent'); } catch (err) { toast(err.message); }
       break;
+    case 'family-member': state.familyMember = id || null; render(); window.scrollTo(0, 0); break;
+    case 'family-reload': state.family = null; render(); loadFamily(); break;
+    case 'sign-out': {
+      el.disabled = true;
+      let synced = true;
+      try { await cloud.syncNow(); } catch { synced = false; }
+      if (!synced && !confirm('Some changes have not reached the cloud yet (no internet?). If you sign out now they stay only on this device. Sign out anyway?')) { el.disabled = false; return; }
+      auth.logout();
+      state.family = null;
+      signedOut();
+      toast('Signed out');
+      break;
+    }
   }
 });
 
 document.addEventListener('submit', async e => {
+  const authForm = e.target.closest('[data-form="auth"]');
+  if (authForm) {
+    e.preventDefault();
+    const f = new FormData(authForm);
+    const btn = authForm.querySelector('.btn.primary');
+    btn.disabled = true;
+    try {
+      const email = String(f.get('email')).trim();
+      if (state.authMode === 'reset') {
+        await auth.resetPassword(email);
+        toast('Check your inbox for the reset link');
+        state.authMode = 'login';
+        render();
+        return;
+      }
+      if (state.authMode === 'register') await auth.register(String(f.get('name')).trim(), email, f.get('password'));
+      else await auth.login(email, f.get('password'));
+      await enterAccount();
+      toast(`Welcome, ${auth.current().name}`);
+    } catch (err) {
+      toast(err.message);
+    } finally {
+      btn.disabled = false;
+    }
+    return;
+  }
   const form = e.target.closest('[data-form="add-category"]');
   if (!form) return;
   e.preventDefault();
@@ -630,9 +824,12 @@ window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); instal
 
 // ---------- start ----------
 
-if (['dashboard', 'income', 'spending', 'investments', 'settings'].includes(location.hash.slice(1))) state.tab = location.hash.slice(1);
-await load();
-render();
-runSync(false);
+if (['dashboard', 'income', 'spending', 'investments', 'settings', 'family'].includes(location.hash.slice(1))) state.tab = location.hash.slice(1);
+if (auth.current()) {
+  await enterAccount();
+  if (state.tab === 'family') loadFamily();
+} else {
+  render();
+}
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') runSync(false); });
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('sw.js').catch(() => {});

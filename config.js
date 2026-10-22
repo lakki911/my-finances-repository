@@ -1,3 +1,10 @@
-// Google OAuth "Web application" client ID used for Google Drive sync.
-// Leave empty to hide sync. This ID is public by design; it is not a secret.
-export const GOOGLE_CLIENT_ID = '235602194612-3c4b6p48314ihkjatb7sccvojiqp3dsg.apps.googleusercontent.com';
+// Firebase project used for accounts and the shared family database.
+// These values are public by design (they identify the project); access is
+// controlled by the Firestore security rules in firestore.rules.
+export const FIREBASE = {
+  apiKey: '',
+  projectId: '',
+};
+
+// Emails that can see every family member's records. Must match firestore.rules.
+export const ADMIN_EMAILS = [];

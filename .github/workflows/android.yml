@@ -46,9 +46,6 @@ jobs:
 
       - run: npx cap add android
 
-      # Google sign-in with Drive access needs MainActivity to hand results to the plugin.
-      - name: Use custom MainActivity
-        run: cp MainActivity.java android/app/src/main/java/com/lakki911/myfinances/MainActivity.java
       - run: npx capacitor-assets generate --android
 
       - name: Set app version from run number
