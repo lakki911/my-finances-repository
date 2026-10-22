@@ -34,11 +34,14 @@ function claims(idToken) {
   try { return JSON.parse(atob(idToken.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))); } catch { return {}; }
 }
 
+// Give up on a request the server never answers, so nothing waits forever.
+export const timeout = (ms = 30000) => (AbortSignal.timeout ? AbortSignal.timeout(ms) : undefined);
+
 async function call(path, body) {
   let res;
   try {
     res = await fetch(`https://identitytoolkit.googleapis.com/v1/${path}?key=${FIREBASE.apiKey}`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      signal: timeout(), method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
     });
   } catch {
     throw new Error('No internet connection. Connect and try again.');
@@ -101,7 +104,7 @@ export async function token({ force = false } = {}) {
   let res;
   try {
     res = await fetch(`https://securetoken.googleapis.com/v1/token?key=${FIREBASE.apiKey}`, {
-      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      signal: timeout(), method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: `grant_type=refresh_token&refresh_token=${encodeURIComponent(session.refreshToken)}`,
     });
   } catch {

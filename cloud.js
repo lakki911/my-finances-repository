@@ -14,7 +14,7 @@ const base = () => `https://firestore.googleapis.com/v1/projects/${FIREBASE.proj
 async function request(path, options = {}) {
   const send = async t => {
     try {
-      return await fetch(`${base()}/${path}`, { ...options, headers: { Authorization: `Bearer ${t}`, 'Content-Type': 'application/json', ...options.headers } });
+      return await fetch(`${base()}/${path}`, { signal: auth.timeout(), ...options, headers: { Authorization: `Bearer ${t}`, 'Content-Type': 'application/json', ...options.headers } });
     } catch {
       throw new Error('Offline. Changes are saved on this device and will sync later.');
     }

@@ -2323,7 +2323,8 @@ document.addEventListener('click', async e => {
     case 'sign-out': {
       el.disabled = true;
       let synced = true;
-      try { await cloud.syncNow(); } catch { synced = false; }
+      // Don't let a stuck sync hold sign-out: wait at most 15 seconds.
+      try { await Promise.race([cloud.syncNow(), new Promise((_, no) => setTimeout(no, 15000))]); } catch { synced = false; }
       if (!synced && !confirm('Some changes have not reached the cloud yet (no internet?). If you sign out now they stay only on this device. Sign out anyway?')) { el.disabled = false; return; }
       auth.logout();
       lock.clear();
