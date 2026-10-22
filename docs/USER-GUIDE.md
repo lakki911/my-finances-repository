@@ -23,7 +23,7 @@
 | **Income** and **Spending** | Your entries for the month. Tap one to change or delete it. |
 | **Invest** | Holdings, returns per year (XIRR), asset allocation, and mutual fund values from the daily NAV. |
 | **Plan** | Budgets, savings, bills and recurring items, savings goals, money lent and borrowed, loans, and insurance and FDs. |
-| **Reports** | The year (April to March or January to December), monthly summary, trends, net worth, income tax estimate, and Excel or CSV export. |
+| **Reports** | The year (April to March or January to December), monthly summary, trends, net worth, income tax estimate, audit trail, and Excel or CSV export. |
 | **Family** | Family budgets and goals, and split expenses. Admins and co-admins also see each member's records, recent activity and roles. |
 | 🔍 and ⚙ at the top | Search all your records, and Settings. |
 
@@ -59,8 +59,11 @@
 - **Net worth:** investments plus money lent, minus loans and money borrowed. The app records it each month so the chart grows over time.
 - **Export:** download a period as an Excel file (entries, investments, holdings and a monthly summary) or a CSV file. On the phone, it opens the share menu so you can save it to Drive or send it.
 
+- **Audit trail:** every record you add, change or remove is listed, with when and who. Removed investments and savings are kept with their full history; tap one to see it or **Restore** it. The Excel export includes the audit trail.
+
 ## Family sharing
 
+- Admins see a **Users** list under **Family → Members**: how many people have signed up, who was active in the last 30 days, each person's role, when they joined and last synced.
 - The admin adds each person under **Family → Members → Roles**: **Member** (shares family budgets, goals and split expenses), **Viewer** (can see them but not change them), **Co-admin** (also sees everyone's records), or **Removed** (can no longer sync).
 - **Family budgets** add up everyone's spending in a main category with the same name, for example Groceries.
 - **Split expenses:** record a shared bill and who paid. The app shows who owes whom, and **Settle up** records a repayment.

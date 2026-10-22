@@ -50,7 +50,7 @@ All JavaScript files must stay in the repo root: the APK build copies `../*.js`.
 |---|---|
 | `index.html` | App shell: top bar (month picker, search and settings buttons), `<main id="view">`, floating + button, tab bar, `<dialog>`, toast. |
 | `app.js` | All UI (~2,500 lines): state, views per tab and sub-view, dialogs, event delegation via `data-action`, recurring posting, budgets, insights, family sharing, idle sign-out. |
-| `db.js` | IndexedDB layer (`DB_VERSION` 3): `all`, `get`, `put`, `remove` (soft delete), `exportAll`, `importAll` (merge), `wipe`, `readLegacy`. `STORES` lists every store. |
+| `db.js` | IndexedDB layer (`DB_VERSION` 4): `all`, `get`, `put`, `remove` (soft delete), `exportAll`, `importAll` (merge), `wipe`, `readLegacy`. `STORES` lists every store. |
 | `auth.js` | Firebase Authentication REST: register (+ verification email), login, password reset, change password, token refresh, `isAdmin()`. Session in `localStorage['auth.session']`. |
 | `cloud.js` | Firestore REST: `syncNow` (own data), `family()` (admin/co-admin reads everyone), shared family space (`roles`, `setRole`, `getShared`, `mergeShared`, `publishTotals`, `people`), receipts, devices. |
 | `finance.js` | Pure maths: `xirr`, `emi`, `schedule` (loan amortisation with prepayments), `incomeTax` (India, Budget 2025 slabs, old vs new regime). |
@@ -86,6 +86,8 @@ loans       { id, kind, name, principal, rate, months, start: 'YYYY-MM', emi?, p
 policies    { id, kind: 'life'|'term'|'health'|'vehicle'|'fd'|'other', name, provider, number, premium, cover, maturity, every, next, closed }
 templates   { id, name, type, amount, categoryId, method, note, tags }   // quick-add buttons
 savings     { id, name, note, moves: [{ id, date, amount }] }          // money set aside; negative = taken out; never in monthly totals
+audit       { id, at, action: 'added'|'changed'|'deleted'|'restored', store, recordId, name, amount, changes: [text], by, snapshot? }
+            // written by save()/drop() in app.js (pass { audit: false } to skip); cloud chunk audit-YYYY-MM
 ```
 
 - Recurring items post entries with id `<ruleId>-<YYYY-MM>` (and contributions with the same id), so two devices never double-post; a deleted entry's tombstone stops it coming back. `runRecurring()` runs after every sync.
@@ -151,6 +153,7 @@ On every push to `main` (Markdown-only changes skipped), one build at a time:
 
 | Date | Change |
 |---|---|
+| 2026-10-22 | Audit trail (Reports → Audit trail, restore removed items, Excel sheet). Admin Users list in Family → Members (joined = profile doc createTime, last synced = newest data chunk updateTime). |
 | 2026-10-22 | Savings store (Plan → Savings, Overview, net worth). Investment withdrawals (negative contributions) and `opening` contributions kept out of monthly totals. Android update bar (`build.js` BUILD written by the workflow, compared with the latest release tag). Default categories reseeded with fixed ids when a kind is empty. Request timeouts; sign-out no longer waits on a stuck sync. |
 | 2026-10-22 | Family sharing (family budgets, goals, split expenses, roles, activity), other currencies, Auto look, Hindi, idle sign-out, device list, receipt photos. New `firestore.rules` to be pasted by the owner. |
 | 2026-10-22 | Asset allocation, XIRR, mutual fund NAV, loans, insurance and FDs, net worth, trends, tax estimate, monthly summary. |

@@ -205,19 +205,84 @@ async function load() {
   }
 }
 
-async function save(store, record) {
+// `audit: false` for automatic updates that shouldn't appear in the audit trail (fund prices).
+async function save(store, record, { audit = true, action } = {}) {
+  const before = record.id && Array.isArray(state[store]) ? state[store].find(r => r.id === record.id) : null;
   const rec = await db.put(store, record);
   if (Array.isArray(state[store])) {
     const i = state[store].findIndex(r => r.id === rec.id);
     if (i >= 0) state[store][i] = rec; else state[store].push(rec);
   }
+  if (audit) await logAudit(store, action || (before ? 'changed' : 'added'), before, rec);
   scheduleSync();
   return rec;
 }
 async function drop(store, id) {
+  const before = state[store].find(r => r.id === id);
   await db.remove(store, id);
   state[store] = state[store].filter(r => r.id !== id);
+  if (before) await logAudit(store, 'deleted', before, null);
   scheduleSync();
+}
+
+// ---------- audit trail ----------
+// Every add, change and delete of your records is logged in the `audit` store (synced in
+// monthly chunks). A deleted record keeps a full copy, so it can be looked at or restored.
+
+const AUDITED = { entries: 'Entry', investments: 'Investment', savings: 'Savings', goals: 'Goal', debts: 'Lent / borrowed', loans: 'Loan',
+  policies: 'Insurance / FD', budgets: 'Budget', recurring: 'Bill / recurring', categories: 'Category' };
+const AUDIT_ACTION = { added: 'Added', changed: 'Changed', deleted: 'Removed', restored: 'Restored' };
+const MONEY_FIELDS = new Set(['amount', 'currentValue', 'target', 'principal', 'premium', 'cover', 'emi', 'units']);
+const FIELD_LABEL = { amount: 'amount', currentValue: 'current value', categoryId: 'category', name: 'name', note: 'note', date: 'date', target: 'target',
+  by: 'target date', units: 'units', schemeCode: 'linked fund', assetClass: 'asset class', tax: 'tax saving', method: 'payment method', person: 'person',
+  due: 'due date', rate: 'interest', months: 'tenure', premium: 'premium', cover: 'cover', next: 'next due', type: 'type', tags: 'tags', mode: 'mode' };
+const AUDIT_SKIP = new Set(['id', 'updatedAt', 'deleted', 'nav', 'navDate', 'schemeName', 'doneThrough', 'receipt', 'orig']);
+
+function auditName(store, r) {
+  if (store === 'entries') return `${r.type === 'salary' ? 'Salary' : catName(r.categoryId) || TYPE_LABEL[r.type]}${r.note ? ` (${r.note})` : ''}`;
+  if (store === 'debts') return r.person || '';
+  if (store === 'budgets') return r.categoryId === 'all' ? 'All spending' : catName(r.categoryId) || 'Budget';
+  return r.name || '';
+}
+const auditValue = (k, v) => v == null || v === '' ? '–' : MONEY_FIELDS.has(k) && k !== 'units' && typeof v === 'number' ? money(v)
+  : k === 'categoryId' ? catName(v) || '–' : Array.isArray(v) ? v.join(', ') || '–' : typeof v === 'object' ? '…' : String(v);
+const auditMove = x => `${x.amount < 0 ? '−' : ''}${money(Math.abs(x.amount || 0))}${x.date ? ` on ${fmtDate(x.date)}` : ''}`;
+
+function auditChanges(before, after) {
+  const out = [];
+  for (const k of new Set([...Object.keys(before), ...Object.keys(after)])) {
+    if (AUDIT_SKIP.has(k)) continue;
+    const a = before[k], b = after[k];
+    if (JSON.stringify(a ?? null) === JSON.stringify(b ?? null)) continue;
+    if (Array.isArray(a) || Array.isArray(b)) {
+      if ([...(a || []), ...(b || [])].some(x => x && typeof x === 'object' && 'id' in x)) {
+        const ids = new Set((a || []).map(x => x.id)), next = new Set((b || []).map(x => x.id));
+        (b || []).filter(x => !ids.has(x.id)).forEach(x => out.push(`${x.amount < 0 ? 'took out' : 'added'} ${auditMove({ ...x, amount: Math.abs(x.amount) })}`));
+        (a || []).filter(x => !next.has(x.id)).forEach(x => out.push(`deleted ${auditMove(x)}`));
+        continue;
+      }
+    }
+    out.push(`${FIELD_LABEL[k] || k}: ${auditValue(k, a)} → ${auditValue(k, b)}`);
+  }
+  return out;
+}
+
+async function logAudit(store, action, before, after) {
+  if (!AUDITED[store]) return;
+  const r = after || before;
+  const changes = action === 'changed' ? auditChanges(before, after) : [];
+  if (action === 'changed' && !changes.length) return;
+  const amount = store === 'investments' ? (r.currentValue ?? investedTotal(r)) : store === 'savings' ? savingsBalance(r) : typeof r.amount === 'number' ? r.amount : null;
+  const ev = await db.put('audit', { at: new Date().toISOString(), action, store, recordId: r.id, name: auditName(store, r), amount, changes,
+    by: auth.current()?.name || '', ...(action === 'deleted' ? { snapshot: before } : {}) });
+  state.audit.push(ev);
+}
+
+async function restoreFromAudit(ev) {
+  if (state[ev.store].some(r => r.id === ev.recordId)) return toast('It is already there');
+  const { updatedAt, deleted, ...rec } = ev.snapshot;
+  await save(ev.store, rec, { action: 'restored' });
+  toast(`${AUDITED[ev.store]} restored`);
 }
 
 // ---------- sync ----------
@@ -522,6 +587,23 @@ function activity() {
       <div class="main"><div class="title">${esc(p.name)} · ${esc(e.type === 'salary' ? 'Salary' : catName(e.categoryId, p.data))}</div><div class="meta">${TYPE_LABEL[e.type]} on ${fmtDate(e.date)} · ${ago(e.updatedAt)}</div></div>
       <div class="amt ${e.type === 'expense' ? 'spend' : 'income'}">${e.type === 'expense' ? '−' : '+'}${money(e.amount)}</div></div>`);
 }
+// Admins only: everyone who has signed up, with their access and when they last synced.
+function usersCard() {
+  const people = state.family || [];
+  const admins = new Set(ADMIN_EMAILS.map(e => e.toLowerCase()));
+  const roleOf = p => (admins.has(p.email.toLowerCase()) ? 'Admin' : ROLE[state.roles[p.uid]] || 'Not added yet');
+  const recent = people.filter(p => p.lastSync && Date.now() - new Date(p.lastSync) < 30 * 86400_000).length;
+  const counts = people.reduce((m, p) => m.set(roleOf(p), (m.get(roleOf(p)) || 0) + 1), new Map());
+  const records = p => ['entries', 'investments', 'savings', 'goals', 'debts', 'loans', 'policies'].reduce((n, s) => n + (p.data[s]?.length || 0), 0);
+  const day = iso => (iso ? new Date(iso).toLocaleDateString(i18n.locale(), { day: 'numeric', month: 'short', year: 'numeric' }) : '–');
+  return `<div class="section-head"><h2>Users</h2><button class="btn small" data-action="family-reload">Refresh</button></div>
+    <div class="grid">${stat('Signed up', String(people.length))}${stat('Active in the last 30 days', String(recent), 'income')}</div>
+    <p class="muted small-note" style="margin-top:8px">${[...counts].map(([r, n]) => `${esc(r)}: ${n}`).join(' · ')}</p>
+    <div class="card list">${people.slice().sort((a, b) => (b.lastSync || '').localeCompare(a.lastSync || '')).map(p => `<div class="row static">${avatar(p.name)}
+      <div class="main"><div class="title">${esc(p.name)} <span class="badge">${esc(roleOf(p))}</span></div>
+        <div class="meta">${esc(p.email)} · joined ${day(p.joined)} · last synced ${p.lastSync ? ago(p.lastSync) : 'never'} · ${records(p)} records</div></div></div>`).join('') || '<div class="empty">No one has signed up yet.</div>'}</div>`;
+}
+
 function rolesCard() {
   const admins = new Set(ADMIN_EMAILS.map(e => e.toLowerCase()));
   return `<h2>Roles</h2>
@@ -688,7 +770,7 @@ async function refreshNav(list = state.investments.filter(i => i.schemeCode && i
       const nav = parseFloat(d?.data?.[0]?.nav);
       if (!(nav > 0)) continue;
       const [dd, mm, yy] = d.data[0].date.split('-');
-      await save('investments', { ...state.investments.find(x => x.id === i.id), nav, navDate: `${yy}-${mm}-${dd}`, currentValue: Math.round(i.units * nav * 100) / 100 });
+      await save('investments', { ...state.investments.find(x => x.id === i.id), nav, navDate: `${yy}-${mm}-${dd}`, currentValue: Math.round(i.units * nav * 100) / 100 }, { audit: false });
       n++;
     } catch (err) {
       if (!quiet) { toast(err.message); return n; }
@@ -943,7 +1025,7 @@ const views = {
   },
 
   reports() {
-    return subnav('report', { year: 'Year', summary: 'Monthly summary', trends: 'Trends', networth: 'Net worth', tax: 'Tax', export: 'Export' }) + reportViews[state.reportView]();
+    return subnav('report', { year: 'Year', summary: 'Monthly summary', trends: 'Trends', networth: 'Net worth', tax: 'Tax', audit: 'Audit trail', export: 'Export' }) + reportViews[state.reportView]();
   },
 
   search() {
@@ -1000,7 +1082,8 @@ const familyViews = {
         ${stat('Invested this month', money(total.invested), 'invest')}
         ${stat('Portfolio value', money(port.current), '', `${money(port.invested)} invested`)}
       </div>
-      <div class="section-head"><h2>Members</h2><button class="btn small" data-action="family-reload">Refresh</button></div>
+      ${auth.isAdmin() ? usersCard() : ''}
+      <div class="section-head"><h2>Members</h2>${auth.isAdmin() ? '' : '<button class="btn small" data-action="family-reload">Refresh</button>'}</div>
       ${listCard(people.map(({ p, t }) => personRow(p, t)), 'No one has signed up yet.')}
       <h2>Recent activity</h2>
       ${listCard(activity(), 'Nothing recorded yet.')}
@@ -1313,12 +1396,42 @@ function exportRows(range) {
     contributions: [['Date', 'Holding', 'Type', 'Amount'], ...contribs.map(c => [c.date, c.inv.name, catName(c.inv.categoryId), c.amount])],
     holdings: [['Holding', 'Type', 'Invested', 'Current value', 'Gain'],
       ...state.investments.map(i => { const inv = investedTotal(i), cur = i.currentValue ?? inv; return [i.name, catName(i.categoryId), inv, cur, cur - inv]; })],
+    audit: [['When', 'Action', 'What', 'Name', 'Amount', 'Details', 'By'],
+      ...auditList().filter(e => inRange(e.at)).map(e => [e.at.slice(0, 16).replace('T', ' '), AUDIT_ACTION[e.action], AUDITED[e.store], e.name || '', e.amount ?? '', (e.changes || []).join('; '), e.by || ''])],
     summary: [['Month', 'Salary', 'Other income', 'Spending', 'Invested', 'Left over'],
       ...months.map(m => { const t = monthTotals(m); return [monthLabel(m, { month: 'short', year: 'numeric' }), t.salary, t.other, t.spent, t.invested, t.saved]; })],
   };
 }
 
+const AUDIT_FILTERS = { all: 'Everything', deleted: 'Removed', holdings: 'Investments & savings' };
+const auditList = () => [...state.audit].sort((a, b) => b.at.localeCompare(a.at));
+function auditRow(ev) {
+  const t = new Date(ev.at);
+  const amt = ev.amount == null ? '' : `<div class="amt ${ev.action === 'deleted' ? 'spend' : ''}">${money(ev.amount)}</div>`;
+  return `<div class="row" data-action="audit-open" data-id="${ev.id}">
+    <span class="audit-dot ${ev.action}" aria-hidden="true"></span>
+    <div class="main"><div class="title">${esc(ev.name || '–')}</div>
+      <div class="meta"><b>${AUDIT_ACTION[ev.action]} ${esc(AUDITED[ev.store].toLowerCase())}</b> · ${t.toLocaleDateString(i18n.locale(), { day: 'numeric', month: 'short', year: 'numeric' })}, ${t.toLocaleTimeString(i18n.locale(), { hour: 'numeric', minute: '2-digit' })}${ev.by ? ` · ${esc(ev.by)}` : ''}${ev.changes?.length ? ` · ${esc(ev.changes.slice(0, 2).join('; '))}${ev.changes.length > 2 ? '…' : ''}` : ''}</div></div>
+    ${amt}</div>`;
+}
+
 const reportViews = {
+  audit() {
+    const f = state.auditFilter || 'all';
+    const all = auditList();
+    const removed = all.filter(e => e.action === 'deleted' && ['investments', 'savings'].includes(e.store) && !state[e.store].some(r => r.id === e.recordId));
+    const list = all.filter(e => f === 'all' || (f === 'deleted' ? e.action === 'deleted' : ['investments', 'savings'].includes(e.store)));
+    const shown = list.slice(0, state.auditLimit || 100);
+    const thisMonth = all.filter(e => e.at.slice(0, 7) === todayISO().slice(0, 7)).length;
+    return `
+      <div class="grid">${stat('Changes this month', String(thisMonth))}${stat('Removed holdings & savings', String(removed.length), removed.length ? 'spend' : '')}</div>
+      ${removed.length ? `<h2>Removed investments & savings</h2>${listCard(removed.map(auditRow), '')}` : ''}
+      <div class="section-head"><h2>Audit trail</h2></div>
+      <div class="subnav">${Object.entries(AUDIT_FILTERS).map(([k, l]) => `<button class="chip-btn" data-action="audit-filter" data-id="${k}" ${f === k ? 'aria-current="true"' : ''}>${l}</button>`).join('')}</div>
+      ${listCard(shown.map(auditRow), 'Nothing recorded yet. From now on, every record you add, change or remove is listed here.')}
+      ${list.length > shown.length ? `<div class="btn-row" style="justify-content:center;margin-top:12px"><button class="btn" data-action="audit-more">Show more (${list.length - shown.length} older)</button></div>` : ''}
+      <p class="muted small-note">Tap a line for the details. Removed items keep a full copy, so you can see their history or restore them. Changes made before this update aren't listed.</p>`;
+  },
   year() {
     const fy = state.fy;
     const y = state.reportYear ?? (fy ? fyStart(state.month) : Number(state.month.slice(0, 4)));
@@ -1433,7 +1546,7 @@ const reportViews = {
       <div class="card export-card">
         <label class="field">Period<select class="inline-input" id="export-range">${Object.entries(kinds).map(([k, l]) => `<option value="${k}">${esc(l)}</option>`).join('')}</select></label>
         <div class="btn-row"><button class="btn primary" data-action="export-xlsx">Excel file (.xlsx)</button><button class="btn" data-action="export-csv">CSV file</button></div>
-        <p class="muted" style="margin:0">The Excel file has four sheets: all entries, investment contributions, holdings, and a month-by-month summary. The CSV file has the entries only. Both open in Excel and Google Sheets.</p>
+        <p class="muted" style="margin:0">The Excel file has five sheets: all entries, investment contributions, holdings, a month-by-month summary, and the audit trail. The CSV file has the entries only. Both open in Excel and Google Sheets.</p>
       </div>
       <p class="muted small-note">To move all your data to another app or keep a full copy, use Export backup in Settings.</p>`;
   },
@@ -1787,6 +1900,25 @@ function pinDialog(mode) {
       lock.unlock();
       toast(mode === 'set' ? 'App lock is on' : 'PIN changed');
     }
+    render();
+  });
+}
+
+function auditDialog(ev) {
+  const s = ev.snapshot;
+  const moves = s ? [...(s.contributions || s.moves || s.saved || s.repaid || [])].sort(byDateDesc) : [];
+  const fields = s ? Object.entries(s).filter(([k, v]) => !AUDIT_SKIP.has(k) && !Array.isArray(v) && v !== '' && v != null && typeof v !== 'object').map(([k, v]) => `<div class="setting"><span class="muted">${esc(FIELD_LABEL[k] || k)}</span><b>${esc(auditValue(k, v))}</b></div>`) : [];
+  const canRestore = ev.action === 'deleted' && s && !state[ev.store].some(r => r.id === ev.recordId);
+  openDialog(`
+    <h3>${AUDIT_ACTION[ev.action]} ${esc(AUDITED[ev.store].toLowerCase())}</h3>
+    <p class="muted" style="margin-top:0"><b>${esc(ev.name || '–')}</b> · ${new Date(ev.at).toLocaleString(i18n.locale())}${ev.by ? ` · by ${esc(ev.by)}` : ''}</p>
+    ${ev.changes?.length ? `<div class="card settings-list">${ev.changes.map(c => `<div class="setting"><span>${esc(c)}</span></div>`).join('')}</div>` : ''}
+    ${fields.length ? `<b>What it held when removed</b><div class="card settings-list" style="margin-top:6px">${fields.join('')}</div>` : ''}
+    ${moves.length ? `<div class="section-head" style="margin:6px 0 0"><b>History</b><span class="muted">${money(sum(moves, m => m.amount))} in total</span></div>
+      <div style="max-height:200px;overflow:auto">${moves.map(m => `<div class="row static" style="padding:8px 4px"><div class="main meta">${fmtDate(m.date)} ${m.date.slice(0, 4)}</div><div class="amt ${m.amount < 0 ? 'spend' : 'income'}">${m.amount < 0 ? '−' : '+'}${money(Math.abs(m.amount))}</div></div>`).join('')}</div>` : ''}
+    <div class="dialog-actions"><div>${canRestore ? '<button class="btn" value="restore" formnovalidate>Restore</button>' : ''}</div><div class="right"><button class="btn" value="cancel" formnovalidate>Close</button></div></div>`,
+  async (fd, action) => {
+    if (action === 'restore') await restoreFromAudit(ev);
     render();
   });
 }
@@ -2308,6 +2440,9 @@ document.addEventListener('click', async e => {
     case 'edit-entry': entryDialog(state.entries.find(x => x.id === id)); break;
     case 'add-investment': investmentDialog(); break;
     case 'add-savings': savingsDialog(); break;
+    case 'audit-open': auditDialog(state.audit.find(x => x.id === id)); break;
+    case 'audit-filter': state.auditFilter = id; state.auditLimit = 100; render(); break;
+    case 'audit-more': state.auditLimit = (state.auditLimit || 100) + 200; render(); break;
     case 'edit-savings': savingsDialog(state.savings.find(x => x.id === id)); break;
     case 'edit-investment': investmentDialog(state.investments.find(x => x.id === id)); break;
     case 'delete-category': {
@@ -2328,7 +2463,7 @@ document.addEventListener('click', async e => {
       const rows = exportRows(range);
       const xlsx = el.dataset.action === 'export-xlsx';
       const blob = xlsx
-        ? toXLSX([{ name: 'Entries', rows: rows.entries }, { name: 'Investments', rows: rows.contributions }, { name: 'Holdings', rows: rows.holdings }, { name: 'Monthly summary', rows: rows.summary }])
+        ? toXLSX([{ name: 'Entries', rows: rows.entries }, { name: 'Investments', rows: rows.contributions }, { name: 'Holdings', rows: rows.holdings }, { name: 'Monthly summary', rows: rows.summary }, { name: 'Audit trail', rows: rows.audit }])
         : new Blob([toCSV(rows.entries)], { type: 'text/csv' });
       try { await saveFile(`my-finances-${range.file}.${xlsx ? 'xlsx' : 'csv'}`, blob); toast('File ready'); } catch { toast('Could not save the file'); }
       break;

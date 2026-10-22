@@ -408,3 +408,8 @@ fieldset.split-who legend { padding: 0; margin-bottom: 6px; }
 .link-btn { display: block; width: fit-content; margin-top: 4px; white-space: nowrap; padding: 2px 8px; border: 1px solid var(--border); border-radius: 999px; background: none; color: var(--muted); font: inherit; font-size: 12px; cursor: pointer; }
 .link-btn.on { border-color: var(--accent); color: var(--accent); }
 .hint-card { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 14px; margin: 4px 0 8px; box-shadow: none; }
+/* Audit trail */
+.audit-dot { width: 10px; height: 10px; border-radius: 50%; flex: none; margin: 0 6px; background: var(--muted); }
+.audit-dot.added, .audit-dot.restored { background: var(--income); }
+.audit-dot.changed { background: var(--invest); }
+.audit-dot.deleted { background: var(--danger); }

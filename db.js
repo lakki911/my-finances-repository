@@ -3,9 +3,9 @@
 // whichever copy has the newer `updatedAt` wins, and deletes travel as tombstones.
 
 export const LEGACY_DB = 'finance-app'; // the single-user database from before accounts
-const DB_VERSION = 3;
-// v2 added the planning stores, v3 savings. Every store syncs as its own cloud chunk.
-export const STORES = ['entries', 'investments', 'categories', 'settings', 'budgets', 'recurring', 'goals', 'debts', 'loans', 'policies', 'templates', 'savings'];
+const DB_VERSION = 4;
+// v2 added the planning stores, v3 savings, v4 the audit trail. Every store syncs as its own cloud chunk.
+export const STORES = ['entries', 'investments', 'categories', 'settings', 'budgets', 'recurring', 'goals', 'debts', 'loans', 'policies', 'templates', 'savings', 'audit'];
 
 let dbName = LEGACY_DB;
 let dbPromise;

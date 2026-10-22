@@ -1,6 +1,6 @@
 // Cloud sync through Firestore's REST API.
 // Each person's data lives under users/{uid}/data/{chunk}, where a chunk is
-// 'categories', 'investments', 'settings' or 'entries-YYYY'. A chunk document
+// 'categories', 'investments', 'settings', 'entries-YYYY' or 'audit-YYYY-MM'. A chunk document
 // holds its records as one JSON string, so a full sync reads only a handful of
 // documents. Merging is per record: the newer `updatedAt` wins.
 // Who may read what is enforced by Firestore security rules (firestore.rules).
@@ -47,7 +47,7 @@ function chunksOf(data) {
   const groups = {};
   const add = (chunk, rec) => (groups[chunk] ||= []).push(rec);
   for (const store of db.STORES) {
-    for (const rec of data[store] || []) add(store === 'entries' ? `entries-${String(rec.date || '').slice(0, 4) || 'none'}` : store, rec);
+    for (const rec of data[store] || []) add(store === 'entries' ? `entries-${String(rec.date || '').slice(0, 4) || 'none'}` : store === 'audit' ? `audit-${String(rec.at || '').slice(0, 7) || 'none'}` : store, rec);
   }
   const out = {};
   for (const [chunk, recs] of Object.entries(groups)) out[chunk] = JSON.stringify(recs.sort((a, b) => (a.id < b.id ? -1 : 1)));
@@ -61,7 +61,7 @@ function fromChunks(docs) {
     const chunk = docId(doc);
     const json = doc.fields?.json?.stringValue || '[]';
     raw[chunk] = json;
-    const store = chunk.startsWith('entries-') ? 'entries' : chunk;
+    const store = chunk.startsWith('entries-') ? 'entries' : chunk.startsWith('audit-') ? 'audit' : chunk;
     if (data[store]) data[store].push(...JSON.parse(json));
   }
   return { data, raw };
@@ -127,9 +127,11 @@ export async function family() {
   const people = await list('users');
   return Promise.all(people.map(async p => {
     const uid = docId(p);
-    const { data } = fromChunks(await list(`users/${uid}/data`));
+    const docs = await list(`users/${uid}/data`);
+    const { data } = fromChunks(docs);
     for (const store of db.STORES) data[store] = data[store].filter(r => !r.deleted);
-    return { uid, name: p.fields?.name?.stringValue || 'Unnamed', email: p.fields?.email?.stringValue || '', data };
+    const lastSync = docs.map(d => d.updateTime || '').sort().pop() || '';
+    return { uid, name: p.fields?.name?.stringValue || 'Unnamed', email: p.fields?.email?.stringValue || '', joined: p.createTime || '', lastSync, data };
   }));
 }
 
