@@ -1,6 +1,6 @@
 // Cloud sync through Firestore's REST API.
 // Each person's data lives under users/{uid}/data/{chunk}, where a chunk is
-// 'categories', 'investments', 'settings', 'entries-YYYY' or 'audit-YYYY-MM'. A chunk document
+// 'categories', 'investments', 'settings', 'entries-YYYY-MM' or 'audit-YYYY-MM'. A chunk document
 // holds its records as one JSON string, so a full sync reads only a handful of
 // documents. Merging is per record: the newer `updatedAt` wins.
 // Who may read what is enforced by Firestore security rules (firestore.rules).
@@ -47,7 +47,7 @@ function chunksOf(data) {
   const groups = {};
   const add = (chunk, rec) => (groups[chunk] ||= []).push(rec);
   for (const store of db.STORES) {
-    for (const rec of data[store] || []) add(store === 'entries' ? `entries-${String(rec.date || '').slice(0, 4) || 'none'}` : store === 'audit' ? `audit-${String(rec.at || '').slice(0, 7) || 'none'}` : store, rec);
+    for (const rec of data[store] || []) add(store === 'entries' ? `entries-${String(rec.date || '').slice(0, 7) || 'none'}` : store === 'audit' ? `audit-${String(rec.at || '').slice(0, 7) || 'none'}` : store, rec);
   }
   const out = {};
   for (const [chunk, recs] of Object.entries(groups)) out[chunk] = JSON.stringify(recs.sort((a, b) => (a.id < b.id ? -1 : 1)));
@@ -111,6 +111,11 @@ export function syncNow() {
         method: 'PATCH',
         body: JSON.stringify({ fields: { json: str(json), updatedAt: { timestampValue: new Date().toISOString() } } }),
       });
+    }
+    // Entries used to be saved one chunk per year (entries-YYYY); a document holds at most 1 MB,
+    // so they are now saved per month. Once the monthly chunks are up, remove the yearly ones.
+    for (const chunk of Object.keys(raw)) {
+      if (chunk.startsWith('entries-') && !(chunk in local)) await request(`users/${me.uid}/data/${chunk}`, { method: 'DELETE' });
     }
     try { localStorage.setItem(`sync.last.${me.uid}`, new Date().toISOString()); } catch {}
     return changed;

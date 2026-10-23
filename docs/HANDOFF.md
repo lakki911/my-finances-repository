@@ -99,7 +99,7 @@ audit       { id, at, action: 'added'|'changed'|'deleted'|'restored', store, rec
 ## 6. Cloud layout and sync
 
 - `users/{uid}`: `{ name, email }`.
-- `users/{uid}/data/{chunk}`: `{ json, updatedAt }`; chunk = each store name, with entries split per year (`entries-YYYY`). `syncNow` pulls all chunks, merges (newer `updatedAt` wins), folds duplicate categories, and PATCHes only changed chunks. New stores sync automatically (chunks come from `db.STORES`).
+- `users/{uid}/data/{chunk}`: `{ json, updatedAt }`; chunk = each store name, with entries split per month (`entries-YYYY-MM`; older yearly `entries-YYYY` chunks are deleted after the first sync) and the audit trail per month (`audit-YYYY-MM`). `syncNow` pulls all chunks, merges (newer `updatedAt` wins), folds duplicate categories, and PATCHes only changed chunks. New stores sync automatically (chunks come from `db.STORES`).
 - `users/{uid}/receipts/{entryId}`: `{ image: <JPEG data URL, under ~700 KB> }`. Fetched only when viewed.
 - `users/{uid}/meta/devices`: `{ json: [{ id, label, lastSeen }] }`, updated at each app start.
 - `family/roles`: `{ members: map uid → 'member'|'viewer'|'coadmin'|'removed'|'none' }`, a real Firestore map because the rules read it. Only admins write it (Family → Members → Roles).
